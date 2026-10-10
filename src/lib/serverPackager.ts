@@ -58,21 +58,40 @@ async function crc32OfFile(file: File, onProgress: (fraction: number) => void): 
   return (c ^ 0xffffffff) >>> 0;
 }
 
+/** Scripts for a deployment bundle: see generateDeployScripts() and the server's api/bundle. */
+export interface BundleFiles {
+  payloadFiles: Array<{ name: string; text: string }>;
+  bundleFiles: Array<{ name: string; text: string }>;
+}
+
 /**
- * Build a .intunewin on the server. Resolves with the download URL once the package is ready.
+ * Build a .intunewin on the server - or, given `bundle`, a zip of the .intunewin (with the payload
+ * scripts packaged inside it) plus the loose bundle files. Resolves with the download URL once it is ready.
  * XMLHttpRequest rather than fetch: it streams a File body from disk just the same, and it is the
  * only one of the two that reports upload progress.
  */
 export async function packageOnServer(
   file: File, setupFile: string, appName: string,
   onProgress: (phase: PackagePhase, fraction: number) => void,
+  bundle?: BundleFiles,
 ): Promise<{ url: string; fileName: string }> {
   const crc = await crc32OfFile(file, (f) => onProgress('checksum', f));
-  const q = new URLSearchParams({ file: setupFile, app: appName, crc32: crc.toString(16) });
+  const meta = { file: setupFile, app: appName, crc32: crc.toString(16) };
+  let url = `api/intunewin?${new URLSearchParams(meta)}`;
+  let body: Blob = file;
+  if (bundle) {
+    // One request: [u32 LE length][JSON][installer]. A Blob made of a Blob is still streamed from
+    // disk by the browser, so the installer is not read into memory to build this.
+    const json = new TextEncoder().encode(JSON.stringify({ ...meta, ...bundle }));
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, json.length, true);
+    url = 'api/bundle';
+    body = new Blob([len, json, file]);
+  }
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `api/intunewin?${q}`);
+    xhr.open('POST', url);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.responseType = 'json';
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress('upload', e.loaded / e.total); };
@@ -83,6 +102,6 @@ export async function packageOnServer(
       else reject(new Error(body?.error ?? `the server answered ${xhr.status}`));
     };
     xhr.onerror = () => reject(new Error('the upload was interrupted'));
-    xhr.send(file);
+    xhr.send(body);
   });
 }

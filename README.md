@@ -1,5 +1,42 @@
 # SwitchHunt
 
+## Workflow: installer to Intune app
+
+**One-time setup** - run the server (any machine with Docker):
+
+```bash
+docker run -d --name switchhunt --restart unless-stopped -p 4321:8080 -v switchhunt-data:/data ghcr.io/preswifi/switchhunt
+```
+
+To update later: `docker pull ghcr.io/preswifi/switchhunt`, `docker rm -f switchhunt`, then the `docker run` line again.
+
+**Per app**
+
+1. Open http://localhost:4321 and drop the installer on the page. It identifies the installer type and shows the silent install and uninstall commands.
+2. Scroll to **Build a .intunewin**. Check the **Install** and **Uninstall** boxes and fix them if needed - especially the uninstall box for EXE installers, which often contains a `<placeholder>`.
+3. Pick the **Detection** rule (MSI code / File / Registry).
+4. Click **Build deployment bundle (.zip)**. It checksums, uploads, and downloads `<installer>-Intune.zip`.
+5. Unzip it and open `README.txt`, which lists exactly what to enter in the portal.
+
+**In Intune** (Apps > Windows > Add > Windows app (Win32))
+
+1. Upload the `.intunewin` from the zip.
+2. Install command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Install.ps1`
+3. Uninstall command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Uninstall.ps1`
+4. Install behavior: System.
+5. Detection rules: use a custom detection script, upload `Detect.ps1`, with "Run script as 32-bit process" and "Enforce script signature check" both set to No.
+6. Assign it to a test device first.
+
+**Troubleshooting on a device** - look in `C:\Intune\Logs` for `<App>_<Version>-Install.log`, `-Uninstall.log` and `-Detect.log` (plus `-Install-msi.log` for MSI installers).
+
+If a command turns out to be wrong, fix it in the box on the page and build the bundle again. Editing the loose `Install.ps1` in the zip does nothing, because Intune runs the copy inside the `.intunewin`.
+
+The **Build .intunewin (on server)** button is still there if you only want the bare package and plan to enter the raw commands yourself.
+
+---
+
+## About
+
 **Drop a Windows installer in your browser → get its silent-install switches.** No signup, no agent. The file you drop is analyzed **entirely in your browser**.
 
 > **This is a fork of [deadarcher/SwitchHunt](https://github.com/deadarcher/SwitchHunt)** that removes the 512 MB limit on `.intunewin` packaging. Upstream builds the package inside the browser tab, which needs 4-5x the installer's size in RAM. This fork ships a small server: the browser is only the front end, the installer is streamed to the server and zipped + encrypted **straight to disk**, and the finished package comes back as a normal download. Memory stays flat (~100 MB on the server, a few tens of MB in the tab) whatever the size - a 5 GB installer packages in under 20 seconds on an SSD. See [Server packaging](#server-packaging-no-size-limit).
@@ -19,6 +56,7 @@ Drop an `.exe` or `.msi` and SwitchHunt identifies the installer engine from its
 - **Deep MSI analysis** - a from-scratch in-browser MS-CFB (compound-file) reader decodes the `Property`, `Control`, `LaunchCondition` and `CustomAction` tables to surface a tiered "**properties you probably need to set**" list (required / likely / sensitive / optional), a full property dump, and an **uninstall-replay** warning (MSI properties are transaction-scoped, so secrets set at install must be passed again at `/x`).
 - **Package for deployment:**
   - a **PSAppDeployToolkit v4** wrapper (`Invoke-AppDeployToolkit.ps1`) with the right `Start-ADTMsiProcess` / `Start-ADTProcess` calls, plus DeployMode / suppress-reboot / Terminal-Server options;
+  - a **deployment bundle** (server only): one zip with the `.intunewin` - `Install.ps1` and `Uninstall.ps1` packaged inside it - plus a `Detect.ps1` for Intune's custom detection script and a README listing the exact portal settings. The scripts log to `C:\Intune\Logs` on the device. See [Deployment bundle](#deployment-bundle);
   - a real **`.intunewin`** (STORE zip + AES-256-CBC + HMAC-SHA256 + `Detection.xml`, exactly like `IntuneWinAppUtil.exe`) - uploadable straight to Intune, no toolchain to install. Built on the server with no size limit, or in the browser (up to 512 MB) when there is no server.
 
 ### Engines detected
@@ -91,9 +129,26 @@ npm start        # http://localhost:8080 - serves dist/ and the packaging API
 
 The upload is verified against the declared size and CRC-32, and a mismatch is rejected. Keys are generated per package with `crypto.randomBytes` and exist only inside the package's own `Detection.xml`, as the format requires.
 
+### Deployment bundle
+
+**Build deployment bundle (.zip)** produces `<installer>-Intune.zip`:
+
+| File | Use |
+| --- | --- |
+| `<installer>.intunewin` | The app package. Contains the installer, `Install.ps1` and `Uninstall.ps1`. |
+| `Detect.ps1` | Upload as the custom detection script. |
+| `Install.ps1`, `Uninstall.ps1` | Reference copies of the two scripts inside the package. |
+| `README.txt` | The install / uninstall commands and detection settings to enter in Intune, and anything to fix first. |
+
+- **Install / Uninstall** run the command shown in the two boxes above the button (prefilled from detection or the catalog; edit them if a command has a `<placeholder>` or no uninstall command was found). They relaunch as 64-bit PowerShell, return the installer's own exit code to Intune, write a transcript to `C:\Intune\Logs\<App>_<Version>-Install.log` / `-Uninstall.log`, and add a verbose `/L*v` log for MSI. They refuse to run a command that still contains a `<placeholder>`.
+- **Detect** follows the detection rule picked on the page: a file path when the catalog knows one, the MSI product code when there is one, otherwise the app's display name in "Programs and Features" (a guess from the installer's metadata - check it). Each check adds a line to `C:\Intune\Logs\<App>_<Version>-Detect.log`.
+
+The scripts are generated in the page (`src/lib/deployScripts.ts`) and sent with the upload; the server only zips them. The bundle zip is never written to disk - the server keeps the package and wraps it on the way out - so a bundle needs no more space than a plain package.
+
 ```
 GET  api/health                             -> { ok, maxBytes }
 POST api/intunewin?file=&app=&crc32=<hex>   body: raw installer, Content-Type: application/octet-stream
+POST api/bundle                             body: [u32 LE length][JSON incl. scripts][raw installer]
 GET  api/intunewin/<id>                     -> the package
 ```
 

@@ -633,6 +633,7 @@ const description =
            type PsadtInput, type PsadtOptions, type DetectionKind } from '../lib/psadt';
   import { buildIntuneWin } from '../lib/intunewin';
   import { probeServer, packageOnServer, type ServerInfo } from '../lib/serverPackager';
+  import { generateDeployScripts, LOG_ROOT } from '../lib/deployScripts';
 
   // Largest file read WHOLE into the tab. Only MSIs are ever read whole (see handleFile); everything
   // else is identified from its head slice, so this is not a limit on what can be dropped.
@@ -853,34 +854,43 @@ const description =
     ib.type = 'button'; ib.className = 'primary-btn';
     const status = document.createElement('span'); status.className = 'iw-status';
     const outName = (input.fileName.replace(/\.[^.]+$/, '') || 'package') + '.intunewin';
+    // Server build shared by both buttons: the plain package, or (withScripts) the deployment bundle.
+    const buildOnServer = async (btn: HTMLButtonElement, st: HTMLElement, withScripts: boolean) => {
+      if (!lastFile || !server) return;
+      const file = lastFile;
+      if (server.maxBytes && file.size > server.maxBytes) {
+        st.textContent = ` - this file is over the server's ${fmtSize(server.maxBytes)} limit (MAX_UPLOAD_GB).`;
+        return;
+      }
+      const old = btn.textContent;
+      ib.disabled = bb.disabled = true; btn.textContent = 'Packaging…'; st.textContent = '';
+      try {
+        const pct = (f: number) => `${Math.min(100, Math.floor(f * 100))}%`;
+        const scripts = withScripts ? generateDeployScripts({
+          appName: input.name, version: input.version, fileName: input.fileName,
+          install: installBox.value.trim(), uninstall: uninstallBox.value.trim(), msiProductCode: input.msiProductCode,
+          detection: detKind, detectPath: catDetect,
+        }, outName) : undefined;
+        const built = await packageOnServer(file, input.fileName, input.name, (phase, f) => {
+          st.textContent = phase === 'checksum' ? ` checksumming ${pct(f)}`
+            : phase === 'upload' ? ` uploading + encrypting ${pct(f)}`
+            : ' finishing…';
+        }, scripts);
+        // A plain link download: the browser streams it to disk, nothing passes through the tab.
+        const a = document.createElement('a');
+        a.href = built.url; a.download = built.fileName;
+        document.body.append(a); a.click(); a.remove();
+        st.textContent = ' built - downloading';
+      } catch (e) {
+        st.textContent = ' - packaging failed: ' + (e as Error).message;
+      }
+      ib.disabled = bb.disabled = false; btn.textContent = old;
+    };
     ib.addEventListener('click', async () => {
       if (!lastBuf || !lastFile) return;
       const file = lastFile;
       const old = ib.textContent;
-      if (server) {
-        if (server.maxBytes && file.size > server.maxBytes) {
-          status.textContent = ` - this file is over the server's ${fmtSize(server.maxBytes)} limit (MAX_UPLOAD_GB).`;
-          return;
-        }
-        ib.disabled = true; ib.textContent = 'Packaging…'; status.textContent = '';
-        try {
-          const pct = (f: number) => `${Math.min(100, Math.floor(f * 100))}%`;
-          const built = await packageOnServer(file, input.fileName, input.name, (phase, f) => {
-            status.textContent = phase === 'checksum' ? ` checksumming ${pct(f)}`
-              : phase === 'upload' ? ` uploading + encrypting ${pct(f)}`
-              : ' finishing…';
-          });
-          // A plain link download: the browser streams it to disk, nothing passes through the tab.
-          const a = document.createElement('a');
-          a.href = built.url; a.download = built.fileName;
-          document.body.append(a); a.click(); a.remove();
-          status.textContent = ' built - downloading';
-        } catch (e) {
-          status.textContent = ' - packaging failed: ' + (e as Error).message;
-        }
-        ib.disabled = false; ib.textContent = old;
-        return;
-      }
+      if (server) { await buildOnServer(ib, status, false); return; }
       // Gate on the FILE's size - for large files lastBuf is only the detection head-slice.
       if (file.size > INTUNEWIN_MAX_BYTES) {
         status.textContent = ` - this file is over ${(INTUNEWIN_MAX_BYTES / 1024 / 1024) | 0} MB; too big to package in a browser tab. Run the SwitchHunt server (Docker) to package it there, or use Microsoft's IntuneWinAppUtil.exe.`;
@@ -907,9 +917,33 @@ const description =
         ? `Packaged on the SwitchHunt server: the installer is uploaded, zipped + AES-256 encrypted + HMAC'd straight to the server's disk, and downloaded back. Nothing is held in browser memory, so size is limited only by the server${server.maxBytes ? ` (${fmtSize(server.maxBytes)} here)` : ''} and its free disk space.`
         : `Packages installers up to ${(INTUNEWIN_MAX_BYTES / 1024 / 1024) | 0} MB. The whole package is built in your browser's memory (zip + AES-256 + HMAC), so larger files can be slow or run the tab out of memory - for those, run the SwitchHunt server (Docker) or use Microsoft's IntuneWinAppUtil.exe.`;
     };
+    // ── Deployment bundle: the same package with Install/Uninstall scripts inside, plus Detect.ps1 ──
+    const bb = document.createElement('button');
+    bb.type = 'button'; bb.className = 'besttry-btn'; bb.textContent = 'Build deployment bundle (.zip)';
+    const bstatus = document.createElement('span'); bstatus.className = 'iw-status';
+    bb.addEventListener('click', () => {
+      if (server) { void buildOnServer(bb, bstatus, true); return; }
+      bstatus.textContent = ' - the bundle is built by the SwitchHunt server (Docker); this page is running without one.';
+    });
+    const bbRow = document.createElement('div'); bbRow.className = 'iw-row'; bbRow.append(bb, bstatus);
+    // The commands the scripts will run - editable, because a catalog command can carry a
+    // <placeholder> and an EXE installer often has no known uninstall command at all.
+    const cmdBox = (value: string, placeholder: string) => {
+      const el = document.createElement('input');
+      el.type = 'text'; el.className = 'b-input'; el.value = value; el.placeholder = placeholder;
+      el.autocomplete = 'off'; el.spellcheck = false;
+      return el;
+    };
+    const installBox = cmdBox(rawInstall, 'silent install command');
+    const uninstallBox = cmdBox(rawUninstall, 'silent uninstall command - none detected, enter one if you know it');
+    const bundleNote = note(`Or get everything in one zip: the .intunewin with Install.ps1 and Uninstall.ps1 packaged inside it, a Detect.ps1 for Intune's custom detection script, and a README with the exact commands to enter. The scripts run the two commands shown here (edit them if needed) and log to ${LOG_ROOT} on the device. Detect.ps1 follows the detection rule picked below.`);
     setMode(); void serverReady.then(setMode);
     iroot.append(capNote);
     iroot.append(ibRow);
+    iroot.append(bundleNote);
+    iroot.append(optionRow('Install', installBox));
+    iroot.append(optionRow('Uninstall', uninstallBox));
+    iroot.append(bbRow);
     // How to test the built package without an Intune tenant (Windows Sandbox + decoder).
     const test = document.createElement('details'); test.className = 'test-note';
     const testSum = document.createElement('summary'); testSum.textContent = 'How to test this without Intune';

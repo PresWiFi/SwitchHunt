@@ -32,7 +32,11 @@ const XML_ENTRY = 'IntuneWinPackage/Metadata/Detection.xml';
 const ENC_ENTRY = 'IntuneWinPackage/Contents/IntunePackage.intunewin';
 
 // ── STORE zip records (ZIP64 only when a field overflows) ────────────────────
-interface ZipEntry { name: Buffer; size: number; crc: number; offset: number; }
+export interface ZipEntry {
+  name: Buffer; size: number; crc: number; offset: number;
+  /** Flag the name as UTF-8. Off inside the package itself, to stay identical to the browser builder. */
+  utf8?: boolean;
+}
 
 function zip64Sizes(size: number): Buffer {
   const x = Buffer.alloc(20);
@@ -43,12 +47,13 @@ function zip64Sizes(size: number): Buffer {
   return x;
 }
 
-function localHeader(e: ZipEntry): Buffer {
+export function localHeader(e: ZipEntry): Buffer {
   const z64 = e.size >= U32_MAX;
   const extra = z64 ? zip64Sizes(e.size) : Buffer.alloc(0);
   const h = Buffer.alloc(30);
   h.writeUInt32LE(0x04034b50, 0);
   h.writeUInt16LE(z64 ? 45 : 20, 4);      // version needed
+  h.writeUInt16LE(e.utf8 ? 0x0800 : 0, 6);
   h.writeUInt16LE(0, 8);                  // method: store
   h.writeUInt16LE(0x21, 12);              // mod date (1980-01-01, fixed - same as the browser build)
   h.writeUInt32LE(e.crc, 14);
@@ -78,6 +83,7 @@ function centralHeader(e: ZipEntry): Buffer {
   h.writeUInt32LE(0x02014b50, 0);
   h.writeUInt16LE(z64 ? 45 : 20, 4);      // version made by
   h.writeUInt16LE(z64 ? 45 : 20, 6);      // version needed
+  h.writeUInt16LE(e.utf8 ? 0x0800 : 0, 8);
   h.writeUInt16LE(0, 10);                 // method: store
   h.writeUInt16LE(0x21, 14);
   h.writeUInt32LE(e.crc, 16);
@@ -90,7 +96,7 @@ function centralHeader(e: ZipEntry): Buffer {
 }
 
 /** Central directory + end records for a zip whose entries end at `centralStart`. */
-function zipTail(entries: ZipEntry[], centralStart: number): Buffer {
+export function zipTail(entries: ZipEntry[], centralStart: number): Buffer {
   const central = Buffer.concat(entries.map(centralHeader));
   const z64 = centralStart >= U32_MAX || entries.some((e) => e.size >= U32_MAX || e.offset >= U32_MAX);
   const parts: Buffer[] = [central];
@@ -183,19 +189,30 @@ export interface PackageOptions {
   size: number;
   /** CRC-32 of the installer, needed before the first byte (see the header comment). */
   crc32: number;
+  /** Small files packaged next to the installer (install / uninstall scripts). Held in memory. */
+  extraFiles?: ExtraFile[];
   /** Key material source - only overridden by the parity test, which needs fixed keys. */
   random?: (n: number) => Uint8Array;
 }
 
+export interface ExtraFile { name: string; data: Uint8Array; }
+
 /** Size of the finished package for an installer of `size` bytes - lets the caller check disk space first. */
-export function packagedSize(setupFile: string, appName: string, size: number): number {
-  return layout(setupFile, appName, size).total;
+export function packagedSize(setupFile: string, appName: string, size: number, extraFiles: ExtraFile[] = []): number {
+  return layout(setupFile, appName, size, extraFiles).total;
 }
 
-function layout(setupFile: string, appName: string, size: number) {
+function layout(setupFile: string, appName: string, size: number, extraFiles: ExtraFile[]) {
+  // Payload zip: the installer first (streamed), then the extra files.
   const inner: ZipEntry = { name: Buffer.from(setupFile, 'utf8'), size, crc: 0, offset: 0 };
-  const innerHead = localHeader(inner).length;
-  const payloadSize = innerHead + size + zipTail([inner], innerHead + size).length;
+  let pos = localHeader(inner).length + size;
+  const extras = extraFiles.map((f) => {
+    const e: ZipEntry = { name: Buffer.from(f.name, 'utf8'), size: f.data.length, crc: crc32(f.data), offset: pos };
+    pos += localHeader(e).length + e.size;
+    return e;
+  });
+  const innerCentral = pos;
+  const payloadSize = innerCentral + zipTail([inner, ...extras], innerCentral).length;
   const ctSize = payloadSize - (payloadSize % 16) + 16;          // PKCS7 always adds 1..16 bytes
   const encSize = 32 + 16 + ctSize;
   const b64 = (n: number) => 'A'.repeat(Math.ceil(n / 3) * 4);
@@ -207,18 +224,20 @@ function layout(setupFile: string, appName: string, size: number) {
   const enc: ZipEntry = { name: Buffer.from(ENC_ENTRY), size: encSize, crc: 0, offset: localHeader(xml).length + xmlSize };
   const encData = enc.offset + localHeader(enc).length;
   const centralStart = encData + encSize;
-  return { inner, innerHead, payloadSize, ctSize, xml, enc, encData, centralStart,
+  return { inner, extras, innerCentral, payloadSize, ctSize, xml, enc, encData, centralStart,
            total: centralStart + zipTail([xml, enc], centralStart).length };
 }
 
 /**
  * Stream `source` (the raw installer bytes) into a finished .intunewin at `outPath`.
  * Rejects - leaving a partial file for the caller to delete - if the stream does not match the
- * declared size or CRC-32.
+ * declared size or CRC-32. Resolves with the package's size and its own CRC-32, which is what a zip
+ * that in turn contains the package needs (see the bundle download in main.ts).
  */
-export async function buildIntuneWinFile(source: AsyncIterable<Uint8Array>, outPath: string, o: PackageOptions): Promise<{ size: number }> {
+export async function buildIntuneWinFile(source: AsyncIterable<Uint8Array>, outPath: string, o: PackageOptions): Promise<{ size: number; crc32: number }> {
   const rnd = o.random ?? randomBytes;
-  const L = layout(o.setupFile, o.appName, o.size);
+  const extraFiles = o.extraFiles ?? [];
+  const L = layout(o.setupFile, o.appName, o.size, extraFiles);
   L.inner.crc = o.crc32 >>> 0;
 
   const aesRaw = Buffer.from(rnd(32));
@@ -258,7 +277,11 @@ export async function buildIntuneWinFile(source: AsyncIterable<Uint8Array>, outP
     }
     if (seen !== o.size) throw new Error(`Upload ended after ${seen} of ${o.size} bytes.`);
     if (seenCrc !== L.inner.crc) throw new Error('Upload does not match its declared CRC-32.');
-    await encrypt(zipTail([L.inner], L.innerHead + o.size));
+    for (const [i, e] of L.extras.entries()) {
+      await encrypt(localHeader(e));
+      await encrypt(extraFiles[i].data);
+    }
+    await encrypt(zipTail([L.inner, ...L.extras], L.innerCentral));
 
     const last = cipher.final();
     hmac.update(last);
@@ -277,9 +300,12 @@ export async function buildIntuneWinFile(source: AsyncIterable<Uint8Array>, outP
     L.xml.crc = crc32(xml);
     L.enc.crc = crc32Combine(crc32(mac), tailCrc, 16 + L.ctSize);
 
-    await fh.write(zipTail([L.xml, L.enc], L.centralStart));
-    await fh.write(Buffer.concat([localHeader(L.xml), xml, localHeader(L.enc), mac]), { position: 0 });
-    return { size: L.total };
+    const head = Buffer.concat([localHeader(L.xml), xml, localHeader(L.enc), mac]);
+    const tail = zipTail([L.xml, L.enc], L.centralStart);
+    await fh.write(tail);
+    await fh.write(head, { position: 0 });
+    const fileCrc = crc32Combine(crc32Combine(crc32(head), tailCrc, 16 + L.ctSize), crc32(tail), tail.length);
+    return { size: L.total, crc32: fileCrc };
   } finally {
     await fh.close();
   }

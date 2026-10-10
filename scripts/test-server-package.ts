@@ -11,7 +11,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
-import { mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,7 +97,7 @@ async function readZipEntries(path: string): Promise<Entry[]> {
 }
 
 /** Decrypt a package the way Intune would and hash the installer that comes out. */
-async function unpack(path: string): Promise<{ setupFile: string; sha256: string; macOk: boolean; digestOk: boolean; size: number }> {
+async function unpack(path: string, payloadOut?: string): Promise<{ setupFile: string; sha256: string; macOk: boolean; digestOk: boolean; size: number }> {
   const entries = await readZipEntries(path);
   const xmlE = entries.find((e) => e.name.endsWith('Detection.xml'))!;
   const encE = entries.find((e) => e.name.endsWith('IntunePackage.intunewin'))!;
@@ -114,8 +114,10 @@ async function unpack(path: string): Promise<{ setupFile: string; sha256: string
     // The payload zip is one STORE entry: [local header][installer][central directory...]. Its size
     // field is 0xffffffff under ZIP64, with the real size in the extra field right after the name.
     let headBuf = Buffer.alloc(0), skip = -1, left = 0, size = 0;
-    const feed = (plain: Buffer) => {
+    if (payloadOut) await writeFile(payloadOut, '');
+    const feed = async (plain: Buffer) => {
       digest.update(plain);
+      if (payloadOut) await appendFile(payloadOut, plain);   // small test packages only
       if (skip < 0) {
         headBuf = Buffer.concat([headBuf, plain]);
         if (headBuf.length < 30) return;
@@ -131,9 +133,9 @@ async function unpack(path: string): Promise<{ setupFile: string; sha256: string
     };
     for await (const chunk of fh.createReadStream({ start: encE.dataStart + 48, end: encE.dataStart + encE.size - 1, autoClose: false })) {
       hmac.update(chunk);
-      feed(decipher.update(chunk));
+      await feed(decipher.update(chunk));
     }
-    feed(decipher.final());
+    await feed(decipher.final());
     return {
       setupFile: tag('SetupFile'), size, sha256: inst.digest('hex'),
       macOk: hmac.digest().equals(head.subarray(0, 32)), digestOk: digest.digest('base64') === tag('FileDigest'),
@@ -160,7 +162,7 @@ async function unpack(path: string): Promise<{ setupFile: string; sha256: string
 
     check((await post(installer, crc32(installer), { 'Content-Type': 'text/plain' })).status === 415, 'POST without application/octet-stream is refused (415)');
     check((await post(installer, 12345)).status === 400, 'POST with a wrong CRC-32 is refused (400)');
-    check((await post(randomBytes(11 * 1024 * 1024), 0).catch(() => ({ status: 413 }))).status === 413, 'POST over MAX_UPLOAD_GB is refused (413)');
+    check((await post(randomBytes(11 * 1024 * 1024), 0)).status === 413, 'POST over MAX_UPLOAD_GB is refused (413)');
     check((await readdir(data)).length === 0, 'refused uploads leave nothing on disk');
 
     const built = await (await post(installer, crc32(installer))).json();
@@ -175,6 +177,40 @@ async function unpack(path: string): Promise<{ setupFile: string; sha256: string
       'downloaded package decrypts back to the uploaded installer (HMAC + digest valid)');
     await new Promise((r) => setTimeout(r, 300));
     check((await readdir(data)).length === 0 && (await fetch(base + built.url)).status === 404, 'package is deleted from the server after download');
+
+    // Bundle: [u32 LE length][JSON][installer] -> zip of the package (scripts inside) + loose files.
+    const bundleBody = (meta: object) => {
+      const j = Buffer.from(JSON.stringify(meta));
+      const len = Buffer.alloc(4); len.writeUInt32LE(j.length);
+      return fetch(base + 'api/bundle', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: Buffer.concat([len, j, installer]) as BodyInit });
+    };
+    const meta = {
+      file: 'My App Setup.exe', app: 'My App', crc32: crc32(installer).toString(16),
+      payloadFiles: [{ name: 'Install.ps1', text: 'Write-Output "é"\nexit 0\n' }, { name: 'Uninstall.ps1', text: 'exit 0' }],
+      bundleFiles: [{ name: 'Detect.ps1', text: 'exit 1' }, { name: '..\\..\\README.txt', text: 'read me' }],
+    };
+    check((await bundleBody({ ...meta, payloadFiles: [{ name: 'my app setup.EXE', text: 'x' }] })).status === 400, 'a bundle script that would overwrite the installer is refused (400)');
+    const b = await (await bundleBody(meta)).json();
+    const zipPath = join(tmp, 'bundle.zip');
+    const zipBytes = Buffer.from(await (await fetch(base + b.url)).arrayBuffer());
+    await writeFile(zipPath, zipBytes);
+    const outer = await readZipEntries(zipPath);
+    const slice = (e: Entry) => zipBytes.subarray(e.dataStart, e.dataStart + e.size);
+    check(b.fileName === 'My App Setup-Intune.zip' && zipBytes.length === b.size
+      && outer.map((e) => e.name).join('|') === 'Detect.ps1|README.txt|My App Setup.intunewin'
+      && slice(outer[0]).toString() === '\ufeffexit 1' && slice(outer[1]).toString() === 'read me',
+      'bundle zip holds the loose files (path stripped, .ps1 with BOM) and the package');
+    const inner = join(tmp, 'bundle.intunewin'), payload = join(tmp, 'payload.zip');
+    await writeFile(inner, slice(outer[2]));
+    const bu = await unpack(inner, payload);
+    const pz = await readFile(payload);
+    const pe = await readZipEntries(payload);
+    check(bu.macOk && bu.digestOk && bu.sha256 === createHash('sha256').update(installer).digest('hex')
+      && pe.map((e) => e.name).join('|') === 'My App Setup.exe|Install.ps1|Uninstall.ps1'
+      && pz.subarray(pe[1].dataStart, pe[1].dataStart + pe[1].size).toString() === '\ufeffWrite-Output "é"\r\nexit 0\r\n',
+      'package inside the bundle decrypts to the installer plus Install.ps1 / Uninstall.ps1 (CRLF, BOM)');
+    await new Promise((r) => setTimeout(r, 300));
+    check((await readdir(data)).length === 0, 'bundle is deleted from the server after download');
   } finally { child.kill(); }
 }
 
