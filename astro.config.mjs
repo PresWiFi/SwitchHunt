@@ -1,9 +1,10 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 
-// Static build - the tool is 100% client-side (the installer you drop never leaves the
-// browser), so there's no server or adapter. The output in `dist/` is plain static files;
-// deploy it anywhere: GitHub Pages, Cloudflare Pages, Netlify, or just `npx serve dist`.
+// Static build - no Astro adapter. The output in `dist/` is plain static files and still works
+// on any static host (GitHub Pages, Cloudflare Pages, Netlify, `npx serve dist`), where packaging
+// falls back to the in-browser builder. server/main.ts serves the same `dist/` and adds the
+// on-disk .intunewin packager for installers too big for a browser tab.
 export default defineConfig({
   site: 'https://getrff.com',
   // Relative asset paths (`./_astro/...`) rather than absolute (`/_astro/...`). The build is

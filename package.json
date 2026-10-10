@@ -2,17 +2,19 @@
   "name": "switchhunt",
   "version": "1.0.0",
   "type": "module",
-  "description": "Drop a Windows installer in your browser, get its silent-install switches. 100% client-side - nothing is uploaded.",
+  "description": "Drop a Windows installer in your browser, get its silent-install switches. Analysis is client-side; the optional server builds .intunewin packages of any size on disk.",
   "license": "MIT",
-  "homepage": "https://getrff.com/switchhunt",
+  "homepage": "https://github.com/preswifi/SwitchHunt",
   "repository": {
     "type": "git",
-    "url": "https://github.com/deadarcher/SwitchHunt.git"
+    "url": "https://github.com/preswifi/SwitchHunt.git"
   },
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
+    "start": "node server/main.ts",
+    "test:server": "node scripts/test-server-package.ts",
     "gen:catalog": "tsx scripts/gen-catalog.ts",
     "astro": "astro",
     "check:parity": "node scripts/check-lib-parity.mjs",

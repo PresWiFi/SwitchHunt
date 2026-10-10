@@ -4,5 +4,16 @@ services:
     image: switchhunt
     container_name: switchhunt
     ports:
-      - "4321:80"
+      - "4321:8080"
+    environment:
+      # Largest installer accepted, in GB. 30 is Intune's own Win32 app limit; 0 = no limit.
+      MAX_UPLOAD_GB: "30"
+      # Minutes a built package waits to be downloaded before it is deleted.
+      PACKAGE_TTL_MINUTES: "60"
+    volumes:
+      # Scratch space for packages in flight - needs room for your largest installer.
+      - switchhunt-data:/data
     restart: unless-stopped
+
+volumes:
+  switchhunt-data:
