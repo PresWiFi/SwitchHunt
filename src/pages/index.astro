@@ -850,7 +850,9 @@ const description =
   let iconCache: { file: File; icon: Promise<Blob | null> } | null = null;
   function appIconFor(file: File | null): Promise<Blob | null> {
     if (!file) return Promise.resolve(null);
-    if (iconCache?.file !== file) iconCache = { file, icon: extractAppIcon(file) };
+    // An MSI names its product icon in ARPPRODUCTICON; the analysis has already read the Property table.
+    const msiIcon = lastResult?.msi?.properties.find((p) => p.name === 'ARPPRODUCTICON')?.value;
+    if (iconCache?.file !== file) iconCache = { file, icon: extractAppIcon(file, msiIcon) };
     return iconCache.icon;
   }
   async function imageToPng(f: Blob): Promise<Blob | null> {

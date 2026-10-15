@@ -14,7 +14,7 @@ To update later: `docker pull ghcr.io/preswifi/switchhunt`, `docker rm -f switch
 
 1. Open http://localhost:4321 and drop the installer on the page. It identifies the installer type and shows the silent install and uninstall commands.
 2. Scroll to **Build a .intunewin**. Check the **Install** and **Uninstall** boxes and fix them if needed - especially the uninstall box for EXE installers, which often contains a `<placeholder>`.
-3. Check the **Logo** preview - it is the installer's own icon. If it is a generic setup icon (or there is none, as with MSIs), click **Choose image…** and pick the app's logo.
+3. Check the **Logo** preview - it is the installer's own icon. For an MSI it is the product icon from Programs and Features. If it is a generic setup icon, or there is none, click **Choose image…** and pick the app's logo.
 4. Pick the **Detection** rule (MSI code / File / Registry) and check the value below it: the file the app installs, or its name as it appears under Programs and Features. Without a catalog entry these are guesses.
 5. Click **Build deployment bundle (.zip)**. It checksums, uploads, and downloads `<installer>-Intune.zip`.
 6. Unzip it and open `README.txt`, which lists exactly what to enter in the portal.

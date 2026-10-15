@@ -8,8 +8,9 @@
  * Only the PE headers, the resource directories and the chosen icon are read from the File - each
  * with its own small slice - so a multi-GB installer costs no more than a small one, wherever in
  * the file its icon sits. (Docker Desktop's .rsrc section is 620 MB: the whole payload is a resource.)
- * MSIs are not handled: their icons live in the Icon table's streams.
+ * MSIs: the product icon stream is found by msiIcon.ts and decoded here like any other .ico/EXE.
  */
+import { isCompoundFile, readMsiIconStream } from './msiIcon';
 
 const RT_ICON = 3;
 const RT_GROUP_ICON = 14;
@@ -102,49 +103,79 @@ async function toPng(data: Uint8Array, type: string): Promise<Blob | null> {
   }
 }
 
-/**
- * The installer's largest icon image: a PNG as stored, or a BMP-style image wrapped in a one-image
- * .ico. No DOM needed, so this part also runs under Node.
- */
-export async function readIconImage(file: File): Promise<{ bytes: Uint8Array; type: 'image/png' | 'image/x-icon' } | null> {
-  let r: Rsrc | null;
-  try { r = await readRsrc(file); } catch { return null; }
-  if (!r) return null;
-  const group = await resource(r, RT_GROUP_ICON, null);
-  if (!group || group.length < 6) return null;
-  const gdv = new DataView(group.buffer, group.byteOffset, group.byteLength);
-  const count = gdv.getUint16(4, true);
+type IconImage = { bytes: Uint8Array; type: 'image/png' | 'image/x-icon' };
 
-  // GRPICONDIRENTRY (14 bytes): width, height (0 = 256), colors, reserved, planes, bits, size, id.
+/** Index of the largest, deepest image in an icon directory (ICONDIR or GRPICONDIR), or -1. */
+function largest(dir: Uint8Array, entrySize: 14 | 16): number {
+  const dv = view(dir);
+  if (dir.length < 6) return -1;
   let best = -1, bestScore = -1;
-  for (let i = 0; i < count; i++) {
-    const at = 6 + i * 14;
-    if (at + 14 > group.length) break;
-    const w = group[at] || 256;
-    const score = w * 100 + gdv.getUint16(at + 6, true);
+  for (let i = 0; i < dv.getUint16(4, true); i++) {
+    const at = 6 + i * entrySize;
+    if (at + entrySize > dir.length) break;
+    const score = (dir[at] || 256) * 100 + dv.getUint16(at + 6, true);   // width (0 = 256), then bit depth
     if (score > bestScore) { bestScore = score; best = at; }
   }
-  if (best < 0) return null;
-  const image = await resource(r, RT_ICON, gdv.getUint16(best + 12, true));
-  if (!image) return null;
-  if (isPng(image)) return { bytes: image, type: 'image/png' };
+  return best;
+}
 
-  // A BMP-style image: wrap it in a one-image .ico (the same 12 entry bytes, plus an offset) and let
-  // the browser's icon decoder handle the AND mask and bit depths.
+/**
+ * One icon image, ready to use: a PNG as stored, or a BMP-style image wrapped in a one-image .ico
+ * (its 12 directory-entry bytes, plus an offset) for the browser's icon decoder.
+ */
+function iconImage(entry: Uint8Array, image: Uint8Array): IconImage {
+  if (isPng(image)) return { bytes: image, type: 'image/png' };
   const ico = new Uint8Array(6 + 16 + image.length);
-  const idv = new DataView(ico.buffer);
+  const idv = view(ico);
   idv.setUint16(2, 1, true);
   idv.setUint16(4, 1, true);
-  ico.set(group.subarray(best, best + 12), 6);
+  ico.set(entry.subarray(0, 12), 6);
   idv.setUint32(6 + 8, image.length, true);
   idv.setUint32(6 + 12, 22, true);
   ico.set(image, 22);
   return { bytes: ico, type: 'image/x-icon' };
 }
 
+/** The largest image of an .ico file. */
+function fromIco(ico: Uint8Array): IconImage | null {
+  const best = largest(ico, 16);
+  if (best < 0) return null;
+  const size = view(ico).getUint32(best + 8, true), off = view(ico).getUint32(best + 12, true);
+  if (!size || off + size > ico.length) return null;
+  return iconImage(ico.subarray(best, best + 12), ico.subarray(off, off + size));
+}
+
+/** The largest image of a PE file's first icon group (the one Explorer shows). */
+async function fromPe(file: File): Promise<IconImage | null> {
+  let r: Rsrc | null;
+  try { r = await readRsrc(file); } catch { return null; }
+  if (!r) return null;
+  const group = await resource(r, RT_GROUP_ICON, null);
+  if (!group) return null;
+  const best = largest(group, 14);
+  if (best < 0) return null;
+  const image = await resource(r, RT_ICON, view(group).getUint16(best + 12, true));   // GRPICONDIRENTRY id
+  return image ? iconImage(group.subarray(best, best + 12), image) : null;
+}
+
+/**
+ * The installer's largest icon image: an EXE's own icon, or an MSI's product icon (`msiIcon` is its
+ * ARPPRODUCTICON, when known). No DOM needed, so this part also runs under Node.
+ */
+export async function readIconImage(file: File, msiIcon?: string): Promise<IconImage | null> {
+  const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  if (!isCompoundFile(head)) return fromPe(file);
+  let data: Uint8Array | null;
+  try { data = await readMsiIconStream(file, msiIcon); } catch { return null; }
+  if (!data || data.length < 6) return null;
+  if (data[0] === 0x4d && data[1] === 0x5a) return fromPe(new File([data as BlobPart], 'icon.exe'));   // icon kept in an EXE/DLL
+  if (view(data).getUint32(0, true) === 0x00010000) return fromIco(data);                               // ICONDIR, type 1
+  return isPng(data) ? { bytes: data, type: 'image/png' } : null;
+}
+
 /** The installer's own icon as a PNG, or null when it has none we can read. */
-export async function extractAppIcon(file: File): Promise<Blob | null> {
-  const img = await readIconImage(file);
+export async function extractAppIcon(file: File, msiIcon?: string): Promise<Blob | null> {
+  const img = await readIconImage(file, msiIcon);
   if (!img) return null;
   return img.type === 'image/png' ? new Blob([img.bytes as BlobPart], { type: 'image/png' }) : toPng(img.bytes, img.type);
 }
