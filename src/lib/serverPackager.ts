@@ -61,7 +61,8 @@ async function crc32OfFile(file: File, onProgress: (fraction: number) => void): 
 /** Scripts for a deployment bundle: see generateDeployScripts() and the server's api/bundle. */
 export interface BundleFiles {
   payloadFiles: Array<{ name: string; text: string }>;
-  bundleFiles: Array<{ name: string; text: string }>;
+  /** Beside the package in the zip. Images (the logo) go as base64. */
+  bundleFiles: Array<{ name: string; text: string } | { name: string; base64: string }>;
 }
 
 /**

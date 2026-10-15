@@ -70,6 +70,7 @@ export const CATALOG: CatalogEntry[] = [
     match: { product: /docker desktop/i, file: /Docker Desktop Installer/i },
     install: '"{file}" install --quiet --accept-license',
     uninstall: '"{file}" uninstall --quiet',
+    detect: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
     note: 'Sub-command style (install/uninstall as a verb, not a slash flag). --accept-license is required for unattended.',
   },
   {

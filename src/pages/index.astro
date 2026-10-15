@@ -441,6 +441,7 @@ const description =
   #result #r-intune-body, #result #r-psadt-body { padding-bottom: 14px; }
   #result .iw-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
   #result .iw-status { font-size: 12.5px; color: var(--ink-3); }
+  #result .deploy-logo { width: 40px; height: 40px; object-fit: contain; border: 1px solid var(--line, #ddd); border-radius: 6px; padding: 3px; background: #fff; }
   #result .test-note { margin: 12px 0 0; }
   #result .test-note > summary { font-size: 13px; font-weight: 600; color: var(--brand); cursor: pointer; }
   #result .test-note > summary:hover { text-decoration: underline; }
@@ -633,7 +634,8 @@ const description =
            type PsadtInput, type PsadtOptions, type DetectionKind } from '../lib/psadt';
   import { buildIntuneWin } from '../lib/intunewin';
   import { probeServer, packageOnServer, type ServerInfo } from '../lib/serverPackager';
-  import { generateDeployScripts, LOG_ROOT } from '../lib/deployScripts';
+  import { generateDeployScripts, guessAppName, LOG_ROOT } from '../lib/deployScripts';
+  import { extractAppIcon } from '../lib/appIcon';
 
   // Largest file read WHOLE into the tab. Only MSIs are ever read whole (see handleFile); everything
   // else is identified from its head slice, so this is not a limit on what can be dropped.
@@ -844,6 +846,28 @@ const description =
     };
   }
 
+  // The installer's icon, extracted once per dropped file (renderDeploy runs again on every toggle).
+  let iconCache: { file: File; icon: Promise<Blob | null> } | null = null;
+  function appIconFor(file: File | null): Promise<Blob | null> {
+    if (!file) return Promise.resolve(null);
+    if (iconCache?.file !== file) iconCache = { file, icon: extractAppIcon(file) };
+    return iconCache.icon;
+  }
+  async function imageToPng(f: Blob): Promise<Blob | null> {
+    try {
+      const bmp = await createImageBitmap(f);
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+      c.getContext('2d')!.drawImage(bmp, 0, 0);
+      return await new Promise((resolve) => c.toBlob(resolve, 'image/png'));
+    } catch { return null; }
+  }
+  async function blobBase64(b: Blob): Promise<string> {
+    const bytes = new Uint8Array(await b.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+
   function renderDeploy(input: PsadtInput, rawInstall: string, rawUninstall: string, catDetect?: string) {
     const iroot = $('r-intune-body'); iroot.innerHTML = '';
     const proot = $('r-psadt-body'); proot.innerHTML = '';
@@ -867,10 +891,12 @@ const description =
       try {
         const pct = (f: number) => `${Math.min(100, Math.floor(f * 100))}%`;
         const scripts = withScripts ? generateDeployScripts({
-          appName: input.name, version: input.version, fileName: input.fileName,
+          appName: guessAppName(input.name), version: input.version, fileName: input.fileName,
           install: installBox.value.trim(), uninstall: uninstallBox.value.trim(), msiProductCode: input.msiProductCode,
-          detection: detKind, detectPath: catDetect,
+          detection: detKind, detectPath: detPathBox.value.trim(), detectName: detNameBox.value.trim(),
+          minVersion: detVerBox.value.trim(), hasLogo: !!logo,
         }, outName) : undefined;
+        if (scripts && logo) scripts.bundleFiles.push({ name: 'Logo.png', base64: await blobBase64(logo) });
         const built = await packageOnServer(file, input.fileName, input.name, (phase, f) => {
           st.textContent = phase === 'checksum' ? ` checksumming ${pct(f)}`
             : phase === 'upload' ? ` uploading + encrypting ${pct(f)}`
@@ -943,6 +969,37 @@ const description =
     iroot.append(bundleNote);
     iroot.append(optionRow('Install', installBox));
     iroot.append(optionRow('Uninstall', uninstallBox));
+    // The app logo for Intune: the installer's own icon, or an image picked here instead.
+    let logo: Blob | null = null;
+    const logoImg = document.createElement('img'); logoImg.className = 'deploy-logo'; logoImg.alt = 'App logo'; logoImg.hidden = true;
+    const logoNote = document.createElement('span'); logoNote.className = 'iw-status';
+    const logoPick = document.createElement('input'); logoPick.type = 'file'; logoPick.accept = 'image/png,image/jpeg'; logoPick.hidden = true;
+    const logoBtn = document.createElement('button'); logoBtn.type = 'button'; logoBtn.className = 'besttry-btn'; logoBtn.textContent = 'Choose image…';
+    const setLogo = (b: Blob | null, text: string) => {
+      logo = b;
+      if (logoImg.src) URL.revokeObjectURL(logoImg.src);
+      logoImg.hidden = !b;
+      if (b) logoImg.src = URL.createObjectURL(b); else logoImg.removeAttribute('src');
+      logoNote.textContent = text;
+    };
+    let logoPicked = false;
+    logoBtn.addEventListener('click', () => logoPick.click());
+    logoPick.addEventListener('change', () => {
+      const f = logoPick.files?.[0];
+      if (!f) return;
+      if (f.size > 4 * 1024 * 1024) { logoNote.textContent = ' - that image is over 4 MB; pick a smaller one.'; return; }
+      // Intune takes PNG or JPG; the bundle always calls it Logo.png, so re-encode a JPG.
+      logoPicked = true;
+      void (f.type === 'image/png' ? Promise.resolve(f as Blob) : imageToPng(f))
+        .then((b) => setLogo(b, b ? ` ${f.name} - included in the bundle as Logo.png.` : ' - that image could not be read.'));
+    });
+    setLogo(null, " looking for the installer's icon…");
+    void appIconFor(lastFile).then((b) => {
+      if (logoPicked) return;
+      setLogo(b, b ? " from the installer's icon - included in the bundle as Logo.png. Check it is the app's logo, not a generic setup icon."
+        : ' - the installer has no icon to use. Choose an image, or the bundle goes without a logo.');
+    });
+    iroot.append(optionRow('Logo', logoImg, logoBtn, logoPick, logoNote));
     iroot.append(bbRow);
     // How to test the built package without an Intune tenant (Windows Sandbox + decoder).
     const test = document.createElement('details'); test.className = 'test-note';
@@ -964,16 +1021,41 @@ const description =
     // default to File detection with that real path, but keep the picker working for the other rule types.
     let detKind: DetectionKind = catDetect ? 'file' : defaultDetectionKind(input);
     const detNote = note('');
+    // The values Detect.ps1 checks - editable, because without a catalog entry they are only guesses.
+    const appGuess = guessAppName(input.name);
+    const detPathBox = cmdBox(catDetect ?? '', `a file the app installs, e.g. C:\\Program Files\\${appGuess}\\${appGuess}.exe`);
+    const detNameBox = cmdBox(appGuess + '*', 'name under Programs and Features - * is a wildcard');
+    const detVerBox = cmdBox('', input.version ? `e.g. ${input.version} - empty accepts any version` : 'empty accepts any version');
+    detVerBox.classList.add('b-input-sm');
+    const pathRow = optionRow('File path', detPathBox);
+    const nameRow = optionRow('Display name', detNameBox);
+    const verRow = optionRow('Min version', detVerBox);
     const setDet = () => {
-      const txt = (detKind === 'file' && catDetect)
-        ? `File exists: "${catDetect}" - verified install path for this app.`
-        : detectionRule(input, detKind);
+      const byName = detKind === 'registry' || (detKind === 'msi' && !input.msiProductCode);
+      pathRow.hidden = detKind !== 'file';
+      nameRow.hidden = !byName;
+      verRow.hidden = detKind === 'file';
+      const path = detPathBox.value.trim();
+      let txt: string;
+      if (detKind === 'file') {
+        txt = !path ? 'enter a file the app installs. The installer does not carry its install path, so install it once on a test machine and pick a file it drops (check "Program Files (x86)" for 32-bit apps).'
+          : path === catDetect ? `File exists: "${path}" - verified install path for this app.`
+          : `File exists: "${path}".`;
+      } else if (byName) {
+        txt = `Detect.ps1 looks for an uninstall entry (64-bit and 32-bit registry) whose DisplayName matches "${detNameBox.value.trim() || appGuess + '*'}". `
+          + 'Install the app once and check its exact name under Programs and Features. For a manual Intune rule: ' + detectionRule(input, 'registry');
+      } else {
+        txt = detectionRule(input, detKind);
+      }
       detNote.textContent = 'Detection rule - ' + txt;
     };
+    detPathBox.addEventListener('input', setDet);
+    detNameBox.addEventListener('input', setDet);
     iroot.append(optionRow('Detection', segControl(
       [{ id: 'msi', label: 'MSI code' }, { id: 'file', label: 'File' }, { id: 'registry', label: 'Registry' }],
       detKind, (id) => { detKind = id as DetectionKind; setDet(); },
     )));
+    iroot.append(pathRow, nameRow, verRow);
     setDet();
     iroot.append(detNote);
     iroot.append(note('In Intune: New Win32 app → upload the .intunewin → paste the install/uninstall commands above → set the detection rule above. Done - no IntuneWinAppUtil, no module install.'));

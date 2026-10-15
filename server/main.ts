@@ -14,7 +14,8 @@
  * A bundle is a zip holding the .intunewin plus loose deployment scripts. The JSON names the
  * installer ({ file, app, crc32 }) and carries two lists of small text files: `payloadFiles` go
  * INSIDE the package next to the installer (Install.ps1, Uninstall.ps1), `bundleFiles` sit beside
- * it in the zip (Detect.ps1, README). The scripts are written by the page - see src/lib/deployScripts.ts.
+ * it in the zip (Detect.ps1, README, and Logo.png sent as { name, base64 }). The scripts are written by
+ * the page - see src/lib/deployScripts.ts.
  *
  * No dependencies beyond Node itself. There is NO authentication - run it on a network you trust
  * or put it behind a reverse proxy that adds some.
@@ -135,17 +136,28 @@ async function handleBuild(req: IncomingMessage, res: ServerResponse, q: URLSear
 }
 
 const DRAIN_MAX = 1024 ** 3;
-const MAX_META = 1024 * 1024;   // the JSON in front of a bundle upload: a handful of scripts
+const MAX_META = 8 * 1024 * 1024;   // the JSON in front of a bundle upload: a handful of scripts and a logo
 const MAX_FILES = 16;
+const MAX_IMAGE = 4 * 1024 * 1024;
 
-/** Text files from a bundle request -> named byte buffers, as Windows PowerShell 5.1 wants them. */
+/**
+ * Files from a bundle request -> named byte buffers. Text files are converted as Windows PowerShell
+ * 5.1 wants them; images (the app logo) arrive as base64 and are passed through untouched.
+ */
 function scriptFiles(list: unknown, taken: Set<string>): ExtraFile[] {
   if (!Array.isArray(list) || list.length > MAX_FILES) throw new HttpError(400, 'Bad file list.');
   return list.map((f) => {
     const name = leafName(f?.name);
-    if (!name || typeof f.text !== 'string') throw new HttpError(400, 'Each file needs a name and text.');
+    if (!name) throw new HttpError(400, 'Each file needs a name.');
     if (taken.has(name.toLowerCase())) throw new HttpError(400, `Two files are both named ${name}.`);
     taken.add(name.toLowerCase());
+    if (typeof f.base64 === 'string') {
+      if (!/\.(png|jpe?g)$/i.test(name)) throw new HttpError(400, `${name}: only .png and .jpg files can be sent as binary.`);
+      const data = Buffer.from(f.base64, 'base64');
+      if (!data.length || data.length > MAX_IMAGE) throw new HttpError(400, `${name} is empty or over ${MAX_IMAGE / 1024 ** 2} MB.`);
+      return { name, data };
+    }
+    if (typeof f.text !== 'string') throw new HttpError(400, 'Each file needs a name and text.');
     const text = f.text.replace(/\r?\n/g, '\r\n');
     // 5.1 reads a .ps1 without a BOM as ANSI and mangles anything non-ASCII in it.
     return { name, data: Buffer.from((/\.ps1$/i.test(name) ? '\ufeff' : '') + text, 'utf8') };

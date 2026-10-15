@@ -43,7 +43,7 @@
       },
       "install": "\"{file}\" install --quiet --accept-license",
       "uninstall": "\"{file}\" uninstall --quiet",
-      "detect": null,
+      "detect": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
       "note": "Sub-command style (install/uninstall as a verb, not a slash flag). --accept-license is required for unattended."
     },
     {

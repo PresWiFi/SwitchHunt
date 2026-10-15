@@ -14,13 +14,14 @@ To update later: `docker pull ghcr.io/preswifi/switchhunt`, `docker rm -f switch
 
 1. Open http://localhost:4321 and drop the installer on the page. It identifies the installer type and shows the silent install and uninstall commands.
 2. Scroll to **Build a .intunewin**. Check the **Install** and **Uninstall** boxes and fix them if needed - especially the uninstall box for EXE installers, which often contains a `<placeholder>`.
-3. Pick the **Detection** rule (MSI code / File / Registry).
-4. Click **Build deployment bundle (.zip)**. It checksums, uploads, and downloads `<installer>-Intune.zip`.
-5. Unzip it and open `README.txt`, which lists exactly what to enter in the portal.
+3. Check the **Logo** preview - it is the installer's own icon. If it is a generic setup icon (or there is none, as with MSIs), click **Choose image…** and pick the app's logo.
+4. Pick the **Detection** rule (MSI code / File / Registry) and check the value below it: the file the app installs, or its name as it appears under Programs and Features. Without a catalog entry these are guesses.
+5. Click **Build deployment bundle (.zip)**. It checksums, uploads, and downloads `<installer>-Intune.zip`.
+6. Unzip it and open `README.txt`, which lists exactly what to enter in the portal.
 
 **In Intune** (Apps > Windows > Add > Windows app (Win32))
 
-1. Upload the `.intunewin` from the zip.
+1. Upload the `.intunewin` from the zip. Under App information, upload `Logo.png` as the logo.
 2. Install command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Install.ps1`
 3. Uninstall command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Uninstall.ps1`
 4. Install behavior: System.
@@ -56,7 +57,7 @@ Drop an `.exe` or `.msi` and SwitchHunt identifies the installer engine from its
 - **Deep MSI analysis** - a from-scratch in-browser MS-CFB (compound-file) reader decodes the `Property`, `Control`, `LaunchCondition` and `CustomAction` tables to surface a tiered "**properties you probably need to set**" list (required / likely / sensitive / optional), a full property dump, and an **uninstall-replay** warning (MSI properties are transaction-scoped, so secrets set at install must be passed again at `/x`).
 - **Package for deployment:**
   - a **PSAppDeployToolkit v4** wrapper (`Invoke-AppDeployToolkit.ps1`) with the right `Start-ADTMsiProcess` / `Start-ADTProcess` calls, plus DeployMode / suppress-reboot / Terminal-Server options;
-  - a **deployment bundle** (server only): one zip with the `.intunewin` - `Install.ps1` and `Uninstall.ps1` packaged inside it - plus a `Detect.ps1` for Intune's custom detection script and a README listing the exact portal settings. The scripts log to `C:\Intune\Logs` on the device. See [Deployment bundle](#deployment-bundle);
+  - a **deployment bundle** (server only): one zip with the `.intunewin` - `Install.ps1` and `Uninstall.ps1` packaged inside it - plus a `Detect.ps1` for Intune's custom detection script, the app's icon as `Logo.png`, and a README listing the exact portal settings. The scripts log to `C:\Intune\Logs` on the device. See [Deployment bundle](#deployment-bundle);
   - a real **`.intunewin`** (STORE zip + AES-256-CBC + HMAC-SHA256 + `Detection.xml`, exactly like `IntuneWinAppUtil.exe`) - uploadable straight to Intune, no toolchain to install. Built on the server with no size limit, or in the browser (up to 512 MB) when there is no server.
 
 ### Engines detected

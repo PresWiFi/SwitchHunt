@@ -184,11 +184,13 @@ async function unpack(path: string, payloadOut?: string): Promise<{ setupFile: s
       const len = Buffer.alloc(4); len.writeUInt32LE(j.length);
       return fetch(base + 'api/bundle', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: Buffer.concat([len, j, installer]) as BodyInit });
     };
+    const logo = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x0a, 0x00, 0xff]); // its CR/LF bytes must survive
     const meta = {
       file: 'My App Setup.exe', app: 'My App', crc32: crc32(installer).toString(16),
       payloadFiles: [{ name: 'Install.ps1', text: 'Write-Output "é"\nexit 0\n' }, { name: 'Uninstall.ps1', text: 'exit 0' }],
-      bundleFiles: [{ name: 'Detect.ps1', text: 'exit 1' }, { name: '..\\..\\README.txt', text: 'read me' }],
+      bundleFiles: [{ name: 'Detect.ps1', text: 'exit 1' }, { name: '..\\..\\README.txt', text: 'read me' }, { name: 'Logo.png', base64: logo.toString('base64') }],
     };
+    check((await bundleBody({ ...meta, bundleFiles: [{ name: 'Detect.ps1', base64: logo.toString('base64') }] })).status === 400, 'a binary bundle file that is not an image is refused (400)');
     check((await bundleBody({ ...meta, payloadFiles: [{ name: 'my app setup.EXE', text: 'x' }] })).status === 400, 'a bundle script that would overwrite the installer is refused (400)');
     const b = await (await bundleBody(meta)).json();
     const zipPath = join(tmp, 'bundle.zip');
@@ -197,11 +199,11 @@ async function unpack(path: string, payloadOut?: string): Promise<{ setupFile: s
     const outer = await readZipEntries(zipPath);
     const slice = (e: Entry) => zipBytes.subarray(e.dataStart, e.dataStart + e.size);
     check(b.fileName === 'My App Setup-Intune.zip' && zipBytes.length === b.size
-      && outer.map((e) => e.name).join('|') === 'Detect.ps1|README.txt|My App Setup.intunewin'
-      && slice(outer[0]).toString() === '\ufeffexit 1' && slice(outer[1]).toString() === 'read me',
-      'bundle zip holds the loose files (path stripped, .ps1 with BOM) and the package');
+      && outer.map((e) => e.name).join('|') === 'Detect.ps1|README.txt|Logo.png|My App Setup.intunewin'
+      && slice(outer[0]).toString() === '\ufeffexit 1' && slice(outer[1]).toString() === 'read me' && slice(outer[2]).equals(logo),
+      'bundle zip holds the loose files (path stripped, .ps1 with BOM, logo byte-for-byte) and the package');
     const inner = join(tmp, 'bundle.intunewin'), payload = join(tmp, 'payload.zip');
-    await writeFile(inner, slice(outer[2]));
+    await writeFile(inner, slice(outer[3]));
     const bu = await unpack(inner, payload);
     const pz = await readFile(payload);
     const pe = await readZipEntries(payload);

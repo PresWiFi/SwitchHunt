@@ -19,12 +19,39 @@ export interface DeployScriptInput {
   install: string;
   uninstall: string;
   msiProductCode?: string;
-  /** Detection rule picked on the page, and the verified install path when the catalog has one. */
+  /** Detection rule picked on the page, and the value entered for it there. */
   detection: DetectionKind;
+  /** File rule: a file the app installs. */
   detectPath?: string;
+  /** Registry rule: wildcard pattern for the "Programs and Features" display name. Default: guessAppName(appName) + '*'. */
+  detectName?: string;
+  /** Registry and MSI rules: lowest version that counts as installed. Empty = any. */
+  minVersion?: string;
+  /** A Logo.png goes in the bundle beside the scripts. */
+  hasLogo?: boolean;
 }
 
 export interface TextFile { name: string; text: string; }
+/** A file beside the package in the bundle zip: a script, or an image (the logo) as base64. */
+export type BundleFile = TextFile | { name: string; base64: string };
+
+/**
+ * The app's name as "Programs and Features" is likely to show it, from the installer's ProductName or,
+ * failing that, its file name: "Docker Desktop Installer.exe" -> "Docker Desktop",
+ * "Firefox Setup 131.0.exe" -> "Firefox". A guess - the page lets you correct it.
+ */
+export function guessAppName(name: string): string {
+  const cleaned = name
+    .replace(/\.(exe|msi|msix|appx)$/i, '')
+    .replace(/[_]+/g, ' ')
+    .replace(/(^|[\s.-])v?\d+(\.\d+)+[a-z]?(?=$|[\s.-])/gi, ' ')                        // versions
+    .replace(/(^|[\s.-])(x64|x86|win64|win32|amd64|arm64|64-?bit|32-?bit)(?=$|[\s.-])/gi, ' ')
+    .replace(/(^|[\s.-])(setup|installer|install)(?=$|[\s.-])/gi, ' ')
+    .replace(/\s*[-.]\s*$|^\s*[-.]\s*/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return cleaned || name;
+}
 
 const q = (s: string): string => `'${s.replace(/'/g, "''")}'`; // PowerShell single-quoted literal
 
@@ -115,12 +142,14 @@ exit $exitCode
 `;
 }
 
-/** Which of the three checks Detect.ps1 will actually use, given what is known about the app. */
+/** Which of the three checks Detect.ps1 will actually use, given what was entered on the page. */
 function detectionMode(i: DeployScriptInput): 'file' | 'productCode' | 'displayName' {
   if (i.detection === 'file' && i.detectPath) return 'file';
-  if (i.detection !== 'file' && i.msiProductCode) return 'productCode';
+  if (i.detection === 'msi' && i.msiProductCode) return 'productCode';
   return 'displayName';
 }
+
+const displayNamePattern = (i: DeployScriptInput): string => i.detectName?.trim() || guessAppName(i.appName) + '*';
 
 function detectScript(i: DeployScriptInput): string {
   const mode = detectionMode(i);
@@ -135,8 +164,8 @@ function detectScript(i: DeployScriptInput): string {
 #>
 $DetectFile     = ${q(mode === 'file' ? i.detectPath! : '')}     # a file the app installs; %VARIABLES% are expanded. Leave empty to use the registry
 $ProductCode    = ${q(mode === 'productCode' ? i.msiProductCode! : '')}     # MSI product code; leave empty to match on the display name
-$DisplayName    = ${q(i.appName + '*')}     # wildcard pattern matched against DisplayName
-$MinimumVersion = ''     # e.g. ${q(i.version || '1.2.3')}; leave empty to accept any version
+$DisplayName    = ${q(displayNamePattern(i))}     # wildcard pattern matched against DisplayName
+$MinimumVersion = ${q(mode === 'file' ? '' : i.minVersion?.trim() ?? '')}     # e.g. ${q(i.version || '1.2.3')}; leave empty to accept any version
 $LogRoot        = ${q(LOG_ROOT)}
 $LogName        = ${q(logName(i))}
 
@@ -202,11 +231,15 @@ function readme(i: DeployScriptInput, packageName: string): string {
   const log = logName(i);
   const detects = mode === 'file' ? `the file ${i.detectPath} exists`
     : mode === 'productCode' ? `an installed product with the MSI product code ${i.msiProductCode}`
-    : `an installed program whose name in "Programs and Features" starts with "${i.appName}"`;
+    : `an installed program whose name in "Programs and Features" matches "${displayNamePattern(i)}"`;
+  const minVer = mode !== 'file' && i.minVersion?.trim() ? `, version ${i.minVersion.trim()} or later` : '';
   const warnings: string[] = [];
   if (!i.uninstall) warnings.push('No uninstall command was given. Uninstall.ps1 fails until it has one: enter it in the Uninstall box on the SwitchHunt page and build the bundle again (the copy Intune runs is the one inside the .intunewin).');
   if (/<[^>]+>/.test(i.install + ' ' + i.uninstall)) warnings.push('A command contains a <placeholder> that must be replaced with your own value. The scripts refuse to run until it is: fix the command in the box on the SwitchHunt page and build the bundle again.');
-  if (mode === 'displayName') warnings.push(`Detect.ps1 matches on the display name "${i.appName}*", which is a guess from the installer's metadata. Install the app once on a test machine and check the name under "Programs and Features" (or set $DetectFile to a file it installs) before you rely on it.`);
+  if (i.detection === 'file' && !i.detectPath) warnings.push('File detection was picked but no file path was entered, so Detect.ps1 falls back to the display name below.');
+  if (i.detection === 'msi' && !i.msiProductCode) warnings.push('MSI detection was picked but there is no product code, so Detect.ps1 falls back to the display name below.');
+  if (mode === 'displayName' && !i.detectName?.trim()) warnings.push(`Detect.ps1 matches on the display name "${displayNamePattern(i)}", which is a guess from the installer's metadata. Install the app once on a test machine and check the name under "Programs and Features" (or set $DetectFile to a file it installs) before you rely on it.`);
+  if (/<[^>]+>/.test((mode === 'file' ? i.detectPath : displayNamePattern(i)) ?? '')) warnings.push('The detection rule still contains a <placeholder>. Fix it on the SwitchHunt page and build the bundle again, or Detect.ps1 never reports the app as installed.');
   return `${i.appName}${i.version ? ' ' + i.version : ''} - Intune Win32 app bundle
 Generated by SwitchHunt.
 
@@ -217,7 +250,9 @@ FILES
       Upload this as the custom detection script.
   Install.ps1, Uninstall.ps1
       Copies of the two scripts inside the package, for reference. Editing these copies changes
-      nothing - change the commands on the SwitchHunt page and build the bundle again.
+      nothing - change the commands on the SwitchHunt page and build the bundle again.${i.hasLogo ? `
+  Logo.png
+      The installer's icon. Upload it as the Logo under App information.` : ''}
 
 INTUNE SETTINGS  (Apps > Windows > Add > Windows app (Win32))
   Install command      powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\\Install.ps1
@@ -230,7 +265,7 @@ INTUNE SETTINGS  (Apps > Windows > Add > Windows app (Win32))
 WHAT THE SCRIPTS DO
   Install.ps1     runs:  ${i.install || '(nothing - no command known)'}
   Uninstall.ps1   runs:  ${i.uninstall || '(nothing - no command known)'}
-  Detect.ps1      reports the app as installed when it finds ${detects}.
+  Detect.ps1      reports the app as installed when it finds ${detects}${minVer}.
   Install and uninstall return the installer's own exit code to Intune unchanged.
 
 LOGS ON THE DEVICE  (${LOG_ROOT})
@@ -248,7 +283,7 @@ best-effort; a wrong one ships a broken install to every machine.
  * The scripts for one app. `payloadFiles` belong inside the .intunewin beside the installer;
  * `bundleFiles` sit next to the package in the zip handed to the admin.
  */
-export function generateDeployScripts(i: DeployScriptInput, packageName: string): { payloadFiles: TextFile[]; bundleFiles: TextFile[] } {
+export function generateDeployScripts(i: DeployScriptInput, packageName: string): { payloadFiles: TextFile[]; bundleFiles: BundleFile[] } {
   const install = { name: 'Install.ps1', text: wrapper('Install', i) };
   const uninstall = { name: 'Uninstall.ps1', text: wrapper('Uninstall', i) };
   return {
