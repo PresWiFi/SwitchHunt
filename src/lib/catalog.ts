@@ -16,6 +16,8 @@ export interface CatalogEntry {
   /** Known file path that proves the app is installed - used as the Intune File detection rule for EXE
    *  apps whose real install path we can't read from the installer (NSIS/Inno decide it at install time). */
   detect?: string;
+  /** PowerShell for the deployment bundle's Install.ps1 to run after a successful install, as SYSTEM. */
+  postInstall?: string;
   /** Why it's non-obvious - the gotcha worth surfacing. */
   note?: string;
   /**
@@ -71,7 +73,13 @@ export const CATALOG: CatalogEntry[] = [
     install: '"{file}" install --quiet --accept-license',
     uninstall: '"{file}" uninstall --quiet',
     detect: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
-    note: 'Sub-command style (install/uninstall as a verb, not a slash flag). --accept-license is required for unattended.',
+    postInstall: [
+      '# Docker Desktop only starts for members of the local docker-users group. Add whoever is signed in.',
+      '$user = (Get-CimInstance Win32_ComputerSystem).UserName',
+      'if ($user) { net localgroup docker-users "$user" /add; Write-Output "Added $user to docker-users" }',
+      'else { Write-Output "Nobody is signed in - add users to docker-users yourself" }',
+    ].join('\n'),
+    note: 'Sub-command style (install/uninstall as a verb, not a slash flag). --accept-license is required for unattended. Users must be in the local docker-users group (the post-install step adds the signed-in user).',
   },
   {
     name: 'Adobe Acrobat Reader',

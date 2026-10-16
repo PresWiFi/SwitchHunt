@@ -71,11 +71,14 @@ export interface BundleFiles {
  * XMLHttpRequest rather than fetch: it streams a File body from disk just the same, and it is the
  * only one of the two that reports upload progress.
  */
+/** What the server's own check of a package found (server/inspect.ts). */
+export interface Verified { passed: string[]; files: Array<{ name: string; size: number; crcOk: boolean }>; }
+
 export async function packageOnServer(
   file: File, setupFile: string, appName: string,
   onProgress: (phase: PackagePhase, fraction: number) => void,
   bundle?: BundleFiles,
-): Promise<{ url: string; fileName: string }> {
+): Promise<{ url: string; fileName: string; verified?: Verified }> {
   const crc = await crc32OfFile(file, (f) => onProgress('checksum', f));
   const meta = { file: setupFile, app: appName, crc32: crc.toString(16) };
   let url = `api/intunewin?${new URLSearchParams(meta)}`;
@@ -98,11 +101,38 @@ export async function packageOnServer(
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress('upload', e.loaded / e.total); };
     xhr.upload.onload = () => onProgress('finish', 1);
     xhr.onload = () => {
-      const body = xhr.response as { url?: string; fileName?: string; error?: string } | null;
-      if (xhr.status === 201 && body?.url && body.fileName) resolve({ url: body.url, fileName: body.fileName });
+      const body = xhr.response as { url?: string; fileName?: string; verified?: Verified; error?: string } | null;
+      if (xhr.status === 201 && body?.url && body.fileName) resolve({ url: body.url, fileName: body.fileName, verified: body.verified });
       else reject(new Error(body?.error ?? `the server answered ${xhr.status}`));
     };
     xhr.onerror = () => reject(new Error('the upload was interrupted'));
     xhr.send(body);
+  });
+}
+
+export interface InspectResult extends Verified {
+  ok: boolean;
+  problems: string[];
+  appName?: string;
+  setupFile?: string;
+  /** Text of the small scripts inside the package, by file name. */
+  scripts: Record<string, string>;
+}
+
+/** Upload a .intunewin to the server and open it the way Intune would (server/inspect.ts). */
+export function inspectOnServer(file: File, onProgress: (fraction: number) => void): Promise<InspectResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', 'api/inspect');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      const body = xhr.response as (InspectResult & { error?: string }) | null;
+      if (xhr.status === 200 && body) resolve(body);
+      else reject(new Error(body?.error ?? `the server answered ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('the upload was interrupted'));
+    xhr.send(file);
   });
 }

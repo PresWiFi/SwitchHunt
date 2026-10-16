@@ -177,6 +177,35 @@ async function unpack(path: string, payloadOut?: string): Promise<{ setupFile: s
       'downloaded package decrypts back to the uploaded installer (HMAC + digest valid)');
     await new Promise((r) => setTimeout(r, 300));
     check((await readdir(data)).length === 0 && (await fetch(base + built.url)).status === 404, 'package is deleted from the server after download');
+    check(built.verified?.passed?.length >= 4 && built.verified.files.map((f: { name: string }) => f.name).join('|') === 'My App Setup.exe',
+      'the server checked the package before offering it (verified: HMAC, digest, CRC-32s)');
+
+    // Inspect: a good package, the same package with one ciphertext byte flipped, and junk.
+    const inspect = async (body: Uint8Array) => (await fetch(base + 'api/inspect', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: body as BodyInit })).json();
+    const good = await inspect(pkg);
+    check(good.ok === true && good.setupFile === 'My App Setup.exe' && good.appName === 'My App' && good.files[0]?.crcOk === true, 'POST api/inspect passes a good package');
+    const bad = Buffer.from(pkg);
+    bad[pkg.length - 400] ^= 0xff;   // inside the ciphertext, before the outer central directory
+    const hurt = await inspect(bad);
+    check(hurt.ok === false && hurt.problems.some((p: string) => /HMAC/.test(p)), 'POST api/inspect catches a damaged package (HMAC mismatch)');
+    const junk = await inspect(randomBytes(5000));
+    check(junk.ok === false && /not a zip/.test(junk.problems[0]), 'POST api/inspect rejects a file that is not a .intunewin');
+    await new Promise((r) => setTimeout(r, 300));
+    check((await readdir(data)).length === 0, 'inspected files are deleted from the server');
+
+    // Saved app profiles: JSON only, per key, listed, deleted.
+    const prof = (key: string, init?: RequestInit) => fetch(`${base}api/profiles/${key}`, init);
+    check((await prof('my-app')).status === 404, 'GET api/profiles/<key> is 404 before anything is saved');
+    check((await prof('my-app', { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: '{}' })).status === 415, 'PUT of a profile that is not application/json is refused (415)');
+    check((await prof('my-app', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '[1]' })).status === 400, 'PUT of a profile that is not a JSON object is refused (400)');
+    check((await prof('../etc', { method: 'GET' })).status === 404 && (await prof('My_App', { method: 'GET' })).status === 404, 'profile keys outside [a-z0-9-] do not reach the disk');
+    const saved = await (await prof('my-app', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appName: 'My App', version: '1.0', install: '"{file}" /S' }) })).json();
+    const back = await (await prof('my-app')).json();
+    const list = await (await fetch(base + 'api/profiles')).json();
+    check(saved.ok && back.install === '"{file}" /S' && back.savedAt === saved.savedAt && list.length === 1 && list[0].key === 'my-app' && list[0].version === '1.0',
+      'PUT then GET api/profiles/<key> round-trips, and api/profiles lists it');
+    await prof('my-app', { method: 'DELETE' });
+    check((await prof('my-app')).status === 404, 'DELETE api/profiles/<key> forgets it');
 
     // Bundle: [u32 LE length][JSON][installer] -> zip of the package (scripts inside) + loose files.
     const bundleBody = (meta: object) => {
@@ -212,7 +241,7 @@ async function unpack(path: string, payloadOut?: string): Promise<{ setupFile: s
       && pz.subarray(pe[1].dataStart, pe[1].dataStart + pe[1].size).toString() === '\ufeffWrite-Output "é"\r\nexit 0\r\n',
       'package inside the bundle decrypts to the installer plus Install.ps1 / Uninstall.ps1 (CRLF, BOM)');
     await new Promise((r) => setTimeout(r, 300));
-    check((await readdir(data)).length === 0, 'bundle is deleted from the server after download');
+    check((await readdir(data)).filter((f) => f !== 'profiles').length === 0, 'bundle is deleted from the server after download');
   } finally { child.kill(); }
 }
 

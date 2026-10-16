@@ -21,6 +21,7 @@ const entries = CATALOG.map((e) => ({
   install: e.install,
   uninstall: e.uninstall ?? null,
   detect: e.detect ?? null,
+  postInstall: e.postInstall ?? null,
   note: e.note ?? null,
 }));
 

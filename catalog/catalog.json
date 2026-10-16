@@ -11,6 +11,7 @@
       "install": "{file} /silent /noreboot",
       "uninstall": "{file} /silent /uninstall",
       "detect": null,
+      "postInstall": null,
       "note": "Self-extracting; the switches live in the inner bootstrapper. Add /includeSSON for pass-through SSO, and ADDLOCAL=\"ReceiverInside,ICA_Client,USB,DesktopViewer,WebHelper\" to pick components."
     },
     {
@@ -22,6 +23,7 @@
       "install": "msiexec /i \"{file}\" /qn ALLUSERS=1 OPTIONS=\"noAutoStart=true\"",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "The machine-wide MSI only PROVISIONS a per-user install at each logon. New Teams uses teamsbootstrapper.exe -p instead."
     },
     {
@@ -33,6 +35,7 @@
       "install": "{file} --install \"C:\\Program Files (x86)\\AnyDesk\" --start-with-win --create-shortcuts --silent",
       "uninstall": "\"C:\\Program Files (x86)\\AnyDesk\\AnyDesk.exe\" --remove --silent",
       "detect": null,
+      "postInstall": null,
       "note": "Custom CLI (not MSI-style). --install REQUIRES the target folder as an argument."
     },
     {
@@ -44,7 +47,8 @@
       "install": "\"{file}\" install --quiet --accept-license",
       "uninstall": "\"{file}\" uninstall --quiet",
       "detect": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
-      "note": "Sub-command style (install/uninstall as a verb, not a slash flag). --accept-license is required for unattended."
+      "postInstall": "# Docker Desktop only starts for members of the local docker-users group. Add whoever is signed in.\n$user = (Get-CimInstance Win32_ComputerSystem).UserName\nif ($user) { net localgroup docker-users \"$user\" /add; Write-Output \"Added $user to docker-users\" }\nelse { Write-Output \"Nobody is signed in - add users to docker-users yourself\" }",
+      "note": "Sub-command style (install/uninstall as a verb, not a slash flag). --accept-license is required for unattended. Users must be in the local docker-users group (the post-install step adds the signed-in user)."
     },
     {
       "name": "Adobe Acrobat Reader",
@@ -55,6 +59,7 @@
       "install": "{file} /sAll /rs /msi EULA_ACCEPT=YES",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "/sAll silent, /rs suppress reboot, /msi forwards the rest to the inner MSI. EULA_ACCEPT=YES is mandatory."
     },
     {
@@ -66,6 +71,7 @@
       "install": "{file} /install /quiet /norestart CID=<your-CID>",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "CID (customer ID + checksum) is REQUIRED - without it the sensor installs but never registers."
     },
     {
@@ -77,6 +83,7 @@
       "install": "{file} /quiet InstallAllUsers=1 PrependPath=1",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Custom bootstrapper; properties are bare NAME=value (no slash). Add Include_test=0 to skip the test suite."
     },
     {
@@ -88,6 +95,7 @@
       "install": "{file} /VERYSILENT /MERGETASKS=!runcode",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Inno Setup. /MERGETASKS=!runcode stops it launching after install; add addcontextmenufiles,addtopath for shell integration + PATH."
     },
     {
@@ -99,6 +107,7 @@
       "install": "{file} /VERYSILENT /NORESTART",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Inno Setup. Use /LOADINF=\"config.inf\" to preset components/options (record one with /SAVEINF)."
     },
     {
@@ -110,6 +119,7 @@
       "install": "msiexec /i \"{file}\" /qn ZoomAutoUpdate=\"true\"",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Use the MSI (not the per-user exe) for fleet deploys; pass ZConfig/ZoomAutoUpdate properties for config."
     },
     {
@@ -121,6 +131,7 @@
       "install": "{file} --silent --ignore-reboot",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Qt-based custom installer. --silent + --ignore-reboot; the network-driver install can still prompt unless the Oracle cert is pre-trusted in the cert store."
     },
     {
@@ -132,6 +143,7 @@
       "install": "{file} /S /desktopicon=yes",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "NSIS. Bundles Npcap, which runs its own installer - add /quiet and let it through."
     },
     {
@@ -143,6 +155,7 @@
       "install": "{file} /S",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Add APITOKEN=<token> CUSTOMCONFIGID=<id> ASSIGNMENTOPTIONS=\"...\" to auto-assign the Host to your account."
     },
     {
@@ -154,6 +167,7 @@
       "install": "msiexec /i \"{file}\" /qn PORTAL=\"vpn.company.com\"",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "PORTAL= preconfigures the gateway so users aren't prompted."
     },
     {
@@ -165,6 +179,7 @@
       "install": "{file} /configure config.xml",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Office has NO plain silent switch - it installs via the Office Deployment Tool (setup.exe) driven by a config.xml. Author the XML at config.office.com (channel, bitness, apps, language), ship it next to setup.exe. \"{file} /download config.xml\" pre-stages the bits first."
     },
     {
@@ -176,6 +191,7 @@
       "install": "{file} /sAll /rs /msi EULA_ACCEPT=YES",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Same flags as Reader (/sAll silent, /rs suppress reboot, /msi forwards to the inner MSI; EULA_ACCEPT=YES mandatory). Volume licensing comes from the package built in the Adobe Admin Console, not a command-line key."
     },
     {
@@ -187,6 +203,7 @@
       "install": "msiexec /i \"{file}\" /qn /norestart KEYCODE=<your-volume-key>",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "KEYCODE= (your volume license) is REQUIRED to activate - without it it installs as an unlicensed trial. Add MAKEDEFAULT=0 so it doesn't grab the PDF association."
     },
     {
@@ -198,6 +215,7 @@
       "install": "msiexec /i \"{file}\" /qn /norestart SERIALNUMBER=<your-key>",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "SERIALNUMBER= is REQUIRED to activate; without it you get trial mode."
     },
     {
@@ -209,6 +227,7 @@
       "install": "msiexec /i \"{file}\" /qn TSC_SOFTWARE_KEY=<your-key>",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "TSC_SOFTWARE_KEY= the software key. TechSmith's Deployment Tool emits an .mst - apply it with TRANSFORMS=\"snagit.mst\" to also kill auto-update + the welcome screen."
     },
     {
@@ -220,6 +239,7 @@
       "install": "{file} /key=<your-keycode> /silent",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Tiny stub installer; /key= (your 20-char keycode) is REQUIRED to register the endpoint, /silent suppresses UI. Add /lockautouninstall=<password> to require a password to remove it."
     },
     {
@@ -231,6 +251,7 @@
       "install": "{file} --silent-install",
       "uninstall": "{file} --uninstall",
       "detect": null,
+      "postInstall": null,
       "note": "Custom double-dash CLI (not MSI-style). --silent-install installs + registers the service. Drop a RustDesk2.toml beside the exe to preconfigure the relay/key."
     },
     {
@@ -242,6 +263,7 @@
       "install": "msiexec /i \"{file}\" /qn /norestart",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Bare MSI installs the client but it won't be MANAGED - for unattended enrollment layer the ESET PROTECT config (a generated .mst / install_config.ini) via TRANSFORMS=. A reboot is usually required."
     },
     {
@@ -253,6 +275,7 @@
       "install": "msiexec /i \"{file}\" /qn /norestart",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Use the Enterprise MSI, not the consumer stub exe, for fleet deploys."
     },
     {
@@ -264,6 +287,7 @@
       "install": "{file} /S",
       "uninstall": "\"%ProgramFiles%\\Mozilla Firefox\\uninstall\\helper.exe\" /S",
       "detect": "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
+      "postInstall": null,
       "note": "NSIS. Drop a policies.json / use the MSI for managed settings."
     },
     {
@@ -275,6 +299,7 @@
       "install": "{file} /S",
       "uninstall": "\"%ProgramFiles%\\7-Zip\\Uninstall.exe\" /S",
       "detect": "C:\\Program Files\\7-Zip\\7zFM.exe",
+      "postInstall": null,
       "note": null
     },
     {
@@ -286,6 +311,7 @@
       "install": "{file} /S /allusers",
       "uninstall": "\"%ProgramFiles%\\Notepad++\\uninstall.exe\" /S",
       "detect": "C:\\Program Files\\Notepad++\\notepad++.exe",
+      "postInstall": null,
       "note": "NSIS. /allusers installs machine-wide (HKLM, Program Files); drop it for a per-user install."
     },
     {
@@ -297,6 +323,7 @@
       "install": "{file} /S",
       "uninstall": "\"%ProgramFiles%\\VideoLAN\\VLC\\uninstall.exe\" /S",
       "detect": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+      "postInstall": null,
       "note": null
     },
     {
@@ -308,6 +335,7 @@
       "install": "{file} /S",
       "uninstall": "\"%ProgramFiles%\\WinRAR\\uninstall.exe\" /S",
       "detect": "C:\\Program Files\\WinRAR\\WinRAR.exe",
+      "postInstall": null,
       "note": null
     },
     {
@@ -319,6 +347,7 @@
       "install": "{file} /S",
       "uninstall": "\"%ProgramFiles%\\obs-studio\\uninstall.exe\" /S",
       "detect": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
+      "postInstall": null,
       "note": "NSIS."
     },
     {
@@ -330,6 +359,7 @@
       "install": "{file} /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /ALLUSERS",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Inno Setup, and /VERYSILENT alone is NOT enough. Like Greenshot, GIMP shows the Inno \"Select Setup Install Mode\" dialog, presented BEFORE the silent machinery engages - no /SILENT flag suppresses it. Without /ALLUSERS it hangs forever under a deployment tool (session 0 has nobody to click it). Verified installing machine-wide with these switches. It is also SLOW - roughly 9 minutes for the ~300 MB payload - so raise your deployment timeout above the usual 5-minute default or the job is killed mid-install."
     },
     {
@@ -341,6 +371,7 @@
       "install": "msiexec /i \"{file}\" /qn /norestart",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": null
     },
     {
@@ -352,6 +383,7 @@
       "install": "{file} /S",
       "uninstall": "\"%ProgramFiles%\\FileZilla FTP Client\\uninstall.exe\" /S",
       "detect": null,
+      "postInstall": null,
       "note": "NSIS. /S suppresses the wizard; the bundled-offer screens are skipped by the official silent setup."
     },
     {
@@ -363,6 +395,7 @@
       "install": "msiexec /i \"{file}\" /quiet /norestart",
       "uninstall": "msiexec /x \"{file}\" /quiet /norestart",
       "detect": null,
+      "postInstall": null,
       "note": "MSI (the .exe on the download page is the program itself, not an installer - grab the 64-bit MSI)."
     },
     {
@@ -374,6 +407,7 @@
       "install": "{file} /VERYSILENT /NORESTART",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Inno Setup."
     },
     {
@@ -385,6 +419,7 @@
       "install": "msiexec /i \"{file}\" /qn",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Enterprise MSI only (the consumer build is a per-user .exe). INSTALLDIR sets a custom path."
     },
     {
@@ -396,6 +431,7 @@
       "install": "msiexec /i \"{file}\" /quiet",
       "uninstall": "msiexec /x \"{file}\" /quiet CLEAN=\"1\"",
       "detect": null,
+      "postInstall": null,
       "note": "Vendor docs use /quiet. CLEAN=\"1\" on uninstall also removes registry + user data. ADDLOCAL=\"FX_PDFVIEWER\" installs the viewer only."
     },
     {
@@ -407,6 +443,7 @@
       "install": "{file} -install -s",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Custom installer - NOT an MSI and NOT NSIS, so /S and /qn both do nothing. -install -s is the documented pair."
     },
     {
@@ -418,6 +455,7 @@
       "install": "{file} /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /ALLUSERS",
       "uninstall": null,
       "detect": "C:\\Program Files\\Greenshot\\Greenshot.exe",
+      "postInstall": null,
       "note": "Inno Setup, and /VERYSILENT alone is NOT enough. The installer shows a \"Select Setup Install Mode\" dialog that no /SILENT flag suppresses - without /ALLUSERS it hangs forever under a deployment tool (session 0 has nobody to click it). Also: the silent install OPENS THE GREENSHOT WEBSITE in a browser when it finishes and there is no switch to stop it, confirmed by the maintainers. Add /MERGETASKS=\"!startup\" to skip the run-at-startup entry. No uninstall string is published: the vendor-registered unins000.exe /SILENT hung indefinitely as SYSTEM in testing, and a hanging uninstall is worse than none."
     },
     {
@@ -429,6 +467,7 @@
       "install": "msiexec /i \"{file}\" /quiet /norestart",
       "uninstall": null,
       "detect": null,
+      "postInstall": null,
       "note": "Standard MSI. Add REGISTER_ALL_MSO_TYPES=1 to take over Office file associations, or REGISTER_NO_MSO_TYPES=1 to leave them alone."
     }
   ]

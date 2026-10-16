@@ -30,15 +30,27 @@ const description =
 
     <!-- Dropzone -->
     <label id="drop" class="drop" for="file" tabindex="0">
-      <input id="file" type="file" hidden accept=".exe,.msi,.msp,application/x-msdownload,application/x-msi" />
+      <input id="file" type="file" hidden accept=".exe,.msi,.msp,.intunewin,application/x-msdownload,application/x-msi" />
       <div class="drop-inner">
         <div class="drop-icon"></div>
         <div class="drop-title">Drop an installer here, or click to choose</div>
         <div class="drop-hint">.exe or .msi · read locally, never uploaded</div>
+        <div class="drop-hint" id="drop-inspect-hint" hidden>or a .intunewin, to check it and see what it installs (sent to this server)</div>
       </div>
     </label>
 
     <p id="status" class="status" hidden></p>
+
+    <!-- A dropped .intunewin, opened on the server the way Intune would (server/inspect.ts) -->
+    <section id="inspect" class="result" hidden>
+      <header class="result-head">
+        <div>
+          <div class="result-engine" id="i-verdict">-</div>
+          <div class="result-file" id="i-file"></div>
+        </div>
+      </header>
+      <div id="i-body" class="inspect-body"></div>
+    </section>
 
     <!-- Result -->
     <section id="result" class="result" hidden>
@@ -267,6 +279,13 @@ const description =
 
   .status { margin: 16px 0 0; font-size: 14px; color: var(--ink-2); }
   .status.err { color: var(--danger); }
+  .inspect-body { padding: 4px 0 8px; font-size: 14px; }
+  .inspect-body ul { margin: 6px 0 12px; padding-left: 20px; }
+  .inspect-body li.bad { color: var(--danger); }
+  .inspect-body table { border-collapse: collapse; margin: 6px 0 12px; font-size: 13px; }
+  .inspect-body td { padding: 3px 12px 3px 0; }
+  .inspect-body pre { overflow-x: auto; font-size: 12px; padding: 10px; background: rgba(127, 127, 127, 0.08); border-radius: 6px; }
+  .inspect-body h3 { font-size: 13px; margin: 12px 0 4px; }
 
   .result {
     margin-top: 28px; border: 1px solid var(--border); border-radius: 14px;
@@ -441,6 +460,7 @@ const description =
   #result #r-intune-body, #result #r-psadt-body { padding-bottom: 14px; }
   #result .iw-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
   #result .iw-status { font-size: 12.5px; color: var(--ink-3); }
+  #result .post-input { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; resize: vertical; min-height: 64px; }
   #result .deploy-logo { width: 40px; height: 40px; object-fit: contain; border: 1px solid var(--line, #ddd); border-radius: 6px; padding: 3px; background: #fff; }
   #result .test-note { margin: 12px 0 0; }
   #result .test-note > summary { font-size: 13px; font-weight: 600; color: var(--brand); cursor: pointer; }
@@ -633,7 +653,7 @@ const description =
   import { generatePsadt, psadtCommands, detectionRule, defaultDetectionKind,
            type PsadtInput, type PsadtOptions, type DetectionKind } from '../lib/psadt';
   import { buildIntuneWin } from '../lib/intunewin';
-  import { probeServer, packageOnServer, type ServerInfo } from '../lib/serverPackager';
+  import { probeServer, packageOnServer, inspectOnServer, type ServerInfo } from '../lib/serverPackager';
   import { generateDeployScripts, guessAppName, LOG_ROOT } from '../lib/deployScripts';
   import { extractAppIcon } from '../lib/appIcon';
 
@@ -652,6 +672,7 @@ const description =
     if (!s) return;
     $('iw-where').textContent = 'Built on this SwitchHunt server and streamed to disk, so there is no browser-memory size limit.';
     $('server-note').hidden = false;
+    $('drop-inspect-hint').hidden = false;
   });
   const fmtSize = (n: number) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(n % 1024 ** 3 ? 1 : 0)} GB` : `${Math.round(n / 1024 ** 2)} MB`);
 
@@ -870,7 +891,7 @@ const description =
     return btoa(bin);
   }
 
-  function renderDeploy(input: PsadtInput, rawInstall: string, rawUninstall: string, catDetect?: string) {
+  function renderDeploy(input: PsadtInput, rawInstall: string, rawUninstall: string, catDetect?: string, catPost?: string) {
     const iroot = $('r-intune-body'); iroot.innerHTML = '';
     const proot = $('r-psadt-body'); proot.innerHTML = '';
     const note = (t: string) => { const e = document.createElement('p'); e.className = 'notes'; e.textContent = t; return e; };
@@ -897,6 +918,7 @@ const description =
           install: installBox.value.trim(), uninstall: uninstallBox.value.trim(), msiProductCode: input.msiProductCode,
           detection: detKind, detectPath: detPathBox.value.trim(), detectName: detNameBox.value.trim(),
           minVersion: detVerBox.value.trim(), hasLogo: !!logo,
+          postInstall: postBox.value.trim(), arch: lastResult?.arch,
         }, outName) : undefined;
         if (scripts && logo) scripts.bundleFiles.push({ name: 'Logo.png', base64: await blobBase64(logo) });
         const built = await packageOnServer(file, input.fileName, input.name, (phase, f) => {
@@ -908,7 +930,10 @@ const description =
         const a = document.createElement('a');
         a.href = built.url; a.download = built.fileName;
         document.body.append(a); a.click(); a.remove();
-        st.textContent = ' built - downloading';
+        st.textContent = built.verified
+          ? ` built and checked (decrypts, HMAC and SHA-256 valid, ${built.verified.files.length} file(s) intact) - downloading`
+          : ' built - downloading';
+        if (withScripts) void saveProfile();
       } catch (e) {
         st.textContent = ' - packaging failed: ' + (e as Error).message;
       }
@@ -971,6 +996,12 @@ const description =
     iroot.append(bundleNote);
     iroot.append(optionRow('Install', installBox));
     iroot.append(optionRow('Uninstall', uninstallBox));
+    // Optional PowerShell that Install.ps1 runs after a successful install - e.g. Docker Desktop's
+    // docker-users group. Prefilled from the catalog when it knows one.
+    const postBox = document.createElement('textarea');
+    postBox.className = 'b-input post-input'; postBox.rows = 4; postBox.spellcheck = false; postBox.value = catPost ?? '';
+    postBox.placeholder = 'optional PowerShell, run as SYSTEM after a successful install (e.g. add users to a group, copy a config file)';
+    iroot.append(optionRow('Post-install', postBox));
     // The app logo for Intune: the installer's own icon, or an image picked here instead.
     let logo: Blob | null = null;
     const logoImg = document.createElement('img'); logoImg.className = 'deploy-logo'; logoImg.alt = 'App logo'; logoImg.hidden = true;
@@ -1053,13 +1084,103 @@ const description =
     };
     detPathBox.addEventListener('input', setDet);
     detNameBox.addEventListener('input', setDet);
-    iroot.append(optionRow('Detection', segControl(
+    const detSeg = segControl(
       [{ id: 'msi', label: 'MSI code' }, { id: 'file', label: 'File' }, { id: 'registry', label: 'Registry' }],
       detKind, (id) => { detKind = id as DetectionKind; setDet(); },
-    )));
+    );
+    iroot.append(optionRow('Detection', detSeg));
     iroot.append(pathRow, nameRow, verRow);
     setDet();
     iroot.append(detNote);
+
+    // Values learned by a Windows Sandbox run of the bundle (Test-InSandbox.ps1 -> report.json).
+    const sbPick = document.createElement('input'); sbPick.type = 'file'; sbPick.accept = '.json,application/json'; sbPick.hidden = true;
+    const sbBtn = document.createElement('button'); sbBtn.type = 'button'; sbBtn.className = 'besttry-btn'; sbBtn.textContent = 'Load sandbox results…';
+    const sbNote = document.createElement('span'); sbNote.className = 'iw-status';
+    sbNote.textContent = ' report.json from a Test-InSandbox run: fills in the real display name, program file and uninstall command.';
+    sbBtn.addEventListener('click', () => sbPick.click());
+    sbPick.addEventListener('change', async () => {
+      const f = sbPick.files?.[0];
+      sbPick.value = '';
+      if (!f) return;
+      try {
+        const rep = JSON.parse((await f.text()).replace(/^\ufeff/, ''));
+        if (rep?.tool !== 'SwitchHunt sandbox test') throw new Error('that is not a SwitchHunt sandbox report.json');
+        const L = rep.learned as Record<string, string> | null;
+        if (!L) { sbNote.textContent = ` ${rep.verdict}: the install added nothing to Programs and Features, so there is nothing to learn - use File detection with a file the app installs.`; return; }
+        const changed: string[] = [];
+        if (L.displayNameMatch) { detNameBox.value = L.displayNameMatch; changed.push(`display name "${L.displayNameMatch}"`); }
+        if (L.detectFile) { detPathBox.value = L.detectFile; changed.push(`file ${L.detectFile}`); }
+        const un = uninstallBox.value.trim();
+        if (L.uninstallCommand && (!un || /<[^>]+>/.test(un))) { uninstallBox.value = L.uninstallCommand; changed.push(`uninstall ${L.uninstallCommand}`); }
+        else if (L.uninstallCommand && un !== L.uninstallCommand) changed.push(`(the install registered "${L.uninstallCommand}" as its uninstall - kept yours)`);
+        else if (!L.uninstallCommand && L.uninstallString && !un) changed.push(`(its uninstall string is "${L.uninstallString}" - add its silent switch and enter it above)`);
+        // Prefer the MSI's own product code when the install registered exactly that, then the program
+        // file (a File rule is exact), then the display name.
+        const msiMatch = !!L.productCode && L.productCode.toUpperCase() === input.msiProductCode?.toUpperCase();
+        const want = msiMatch ? 'msi' : L.detectFile ? 'file' : 'registry';
+        (detSeg.querySelector(`[data-id="${want}"]`) as HTMLButtonElement | null)?.click();
+        setDet();
+        sbNote.textContent = ` Loaded the ${String(rep.runAt).replace('T', ' ')} run (${rep.verdict}${L.displayVersion ? ', version ' + L.displayVersion : ''}): ${changed.join('; ')}. Build the bundle again to use them.`;
+      } catch (e) {
+        sbNote.textContent = ' - could not read it: ' + (e as Error).message;
+      }
+    });
+    iroot.append(optionRow('Sandbox', sbBtn, sbPick, sbNote));
+
+    // ── Saved settings (server only): what the last bundle for this app was built with ──
+    // Commands are stored with the installer's file name as {file}, so the next version's installer
+    // (a different file name) slots in. A minimum version that equalled the old installer's version
+    // moves up to the new one - that is what replacing an older version wants.
+    const profKey = guessAppName(input.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'app';
+    const profNote = document.createElement('span'); profNote.className = 'iw-status';
+    const forgetBtn = document.createElement('button'); forgetBtn.type = 'button'; forgetBtn.className = 'besttry-btn'; forgetBtn.textContent = 'Forget'; forgetBtn.hidden = true;
+    const profRow = optionRow('Saved', forgetBtn, profNote); profRow.hidden = true;
+    const toTemplate = (cmd: string) => (input.fileName ? cmd.split(input.fileName).join('{file}') : cmd);
+    const fromTemplate = (cmd: string) => cmd.split('{file}').join(input.fileName);
+    async function saveProfile() {
+      try {
+        const body = {
+          appName: guessAppName(input.name), version: input.version,
+          install: toTemplate(installBox.value.trim()), uninstall: toTemplate(uninstallBox.value.trim()), postInstall: postBox.value.trim(),
+          detection: detKind, detectPath: detPathBox.value.trim(), detectName: detNameBox.value.trim(), minVersion: detVerBox.value.trim(),
+          logo: logoPicked && logo ? await blobBase64(logo) : undefined,
+        };
+        const res = await fetch(`api/profiles/${profKey}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (res.ok) { profNote.textContent = ' saved - the next installer of this app starts from these settings.'; forgetBtn.hidden = false; profRow.hidden = false; }
+      } catch { /* saving is a convenience; the bundle itself already downloaded */ }
+    }
+    forgetBtn.addEventListener('click', async () => {
+      await fetch(`api/profiles/${profKey}`, { method: 'DELETE' }).catch(() => null);
+      forgetBtn.hidden = true;
+      profNote.textContent = ' forgotten. Drop the installer again to start from the defaults.';
+    });
+    void (async () => {
+      await serverReady;
+      if (!server) return;
+      profRow.hidden = false;
+      const res = await fetch(`api/profiles/${profKey}`, { cache: 'no-store' }).catch(() => null);
+      if (!res?.ok) { profNote.textContent = ' none yet - the settings are saved here when you build a bundle.'; return; }
+      const p = await res.json();
+      if (p.install) installBox.value = fromTemplate(p.install);
+      if (p.uninstall != null) uninstallBox.value = fromTemplate(p.uninstall);
+      if (p.postInstall != null) postBox.value = p.postInstall;
+      if (p.detectPath != null) detPathBox.value = p.detectPath;
+      if (p.detectName) detNameBox.value = p.detectName;
+      detVerBox.value = p.minVersion && p.minVersion === p.version && input.version ? input.version : (p.minVersion ?? '');
+      if (p.detection) (detSeg.querySelector(`[data-id="${p.detection}"]`) as HTMLButtonElement | null)?.click();
+      if (p.logo) {
+        const bytes = Uint8Array.from(atob(p.logo), (c) => c.charCodeAt(0));
+        logoPicked = true;
+        setLogo(new Blob([bytes], { type: 'image/png' }), ' the saved logo for this app - included in the bundle as Logo.png.');
+      }
+      setDet();
+      const when = new Date(p.savedAt).toLocaleDateString();
+      const newer = input.version && p.version && p.version !== input.version ? ` - this installer is ${input.version}` : '';
+      profNote.textContent = ` loaded the settings saved ${when} for ${p.appName}${p.version ? ' ' + p.version : ''}${newer}. Check them, then build.`;
+      forgetBtn.hidden = false;
+    })();
+    iroot.append(profRow);
     iroot.append(note('In Intune: New Win32 app → upload the .intunewin → paste the install/uninstall commands above → set the detection rule above. Done - no IntuneWinAppUtil, no module install.'));
 
     // ── PSADT v4 deploy script - needs the PSADT framework around it ──
@@ -1614,7 +1735,7 @@ const description =
         ? cat.uninstall.replaceAll('{file}', dfn)
         : (r.commands.find((c) => /uninstall/i.test(c.label))?.cmd ?? '');
       const catDetect = showCat && cat?.detect ? cat.detect : undefined;
-      renderDeploy(psadtInputFrom(r, dfn, instCmd, unCmd), instCmd, unCmd, catDetect);
+      renderDeploy(psadtInputFrom(r, dfn, instCmd, unCmd), instCmd, unCmd, catDetect, showCat ? cat?.postInstall : undefined);
     } else {
       deployEl.hidden = true;
       $('r-intune-body').innerHTML = '';
@@ -1790,7 +1911,51 @@ const description =
     recomputeBuilder?.();
   }
 
+  /** A dropped .intunewin: upload it to the server, which opens it like Intune would, and show what it found. */
+  async function inspectPackage(file: File) {
+    result.hidden = true;
+    const panel = $('inspect'); panel.hidden = true;
+    await serverReady;
+    if (!server) {
+      setStatus('Checking a .intunewin needs the SwitchHunt server (Docker) - this page is running without one.', true);
+      return;
+    }
+    try {
+      const r = await inspectOnServer(file, (f) => setStatus(`Uploading ${file.name} to check it… ${Math.floor(f * 100)}%`));
+      setStatus('');
+      $('i-verdict').textContent = r.ok ? 'Package OK - Intune can open it' : 'Package has problems';
+      $('i-file').textContent = `${file.name}${r.appName ? ' · ' + r.appName : ''}${r.setupFile ? ' · setup file ' + r.setupFile : ''}`;
+      const body = $('i-body'); body.innerHTML = '';
+      const list = document.createElement('ul');
+      for (const p of r.problems) { const li = document.createElement('li'); li.className = 'bad'; li.textContent = '✗ ' + p; list.append(li); }
+      for (const p of r.passed) { const li = document.createElement('li'); li.textContent = '✓ ' + p; list.append(li); }
+      body.append(list);
+      if (r.files.length) {
+        const h = document.createElement('h3'); h.textContent = 'Files inside';
+        const t = document.createElement('table');
+        for (const f of r.files) {
+          const tr = t.insertRow();
+          tr.insertCell().textContent = f.name;
+          tr.insertCell().textContent = f.size < 1024 ** 2 ? `${Math.max(1, Math.round(f.size / 1024))} KB` : fmtSize(f.size);
+          tr.insertCell().textContent = f.crcOk ? '' : 'damaged';
+        }
+        body.append(h, t);
+      }
+      for (const [name, text] of Object.entries(r.scripts)) {
+        const d = document.createElement('details');
+        const sum = document.createElement('summary'); sum.textContent = name;
+        const pre = document.createElement('pre'); pre.textContent = text;
+        d.append(sum, pre); body.append(d);
+      }
+      panel.hidden = false;
+    } catch (e) {
+      setStatus('Could not check the package: ' + (e as Error).message, true);
+    }
+  }
+
   async function handleFile(file: File) {
+    if (/\.intunewin$/i.test(file.name)) { await inspectPackage(file); return; }
+    $('inspect').hidden = true;
     setStatus(`Reading ${file.name} (${Math.round(file.size / 1024)} KB)…`);
     try {
       lastFile = file;

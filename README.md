@@ -15,18 +15,22 @@ To update later: `docker pull ghcr.io/preswifi/switchhunt`, `docker rm -f switch
 1. Open http://localhost:4321 and drop the installer on the page. It identifies the installer type and shows the silent install and uninstall commands.
 2. Scroll to **Build a .intunewin**. Check the **Install** and **Uninstall** boxes and fix them if needed - especially the uninstall box for EXE installers, which often contains a `<placeholder>`.
 3. Check the **Logo** preview - it is the installer's own icon. For an MSI it is the product icon from Programs and Features. If it is a generic setup icon, or there is none, click **Choose image…** and pick the app's logo.
-4. Pick the **Detection** rule (MSI code / File / Registry) and check the value below it: the file the app installs, or its name as it appears under Programs and Features. Without a catalog entry these are guesses.
-5. Click **Build deployment bundle (.zip)**. It checksums, uploads, and downloads `<installer>-Intune.zip`.
-6. Unzip it and open `README.txt`, which lists exactly what to enter in the portal.
+4. Optional: a **Post-install** step - PowerShell that runs as SYSTEM after a successful install (Docker Desktop's adds the signed-in user to `docker-users`).
+5. Pick the **Detection** rule (MSI code / File / Registry) and check the value below it: the file the app installs, or its name as it appears under Programs and Features. Without a catalog entry these are guesses - step 8 replaces them with the real ones.
+6. Click **Build deployment bundle (.zip)**. It checksums, uploads, and downloads `<installer>-Intune.zip`. The server opens the package the way Intune would before handing it over (decrypts it, checks the HMAC, SHA-256 and every file's CRC-32) - the status line says so. The settings are saved for this app, so the next version's installer starts from them (**Saved** row; **Forget** clears them).
+7. Unzip it and open `README.txt`, which lists exactly what to enter in the portal.
+8. **Test it**: double-click `Test-InSandbox.cmd`. A fresh Windows Sandbox opens and runs the package as Intune would, as SYSTEM - detect, install, detect, uninstall, detect - and writes a pass/fail report to `SandboxResults\<date-time>\`. It also records what the install really registered (display name, version, program file, uninstall command): click **Load sandbox results…** on the page, pick that `report.json`, and build the bundle again. Needs Windows Pro/Enterprise with the Windows Sandbox feature on; apps that need virtualization themselves (Docker Desktop, WSL) cannot run inside it.
 
 **In Intune** (Apps > Windows > Add > Windows app (Win32))
 
 1. Upload the `.intunewin` from the zip. Under App information, upload `Logo.png` as the logo.
-2. Install command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Install.ps1`
-3. Uninstall command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Uninstall.ps1`
+2. Install command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -File .\Install.ps1`
+3. Uninstall command: `powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -File .\Uninstall.ps1`
 4. Install behavior: System.
 5. Detection rules: use a custom detection script, upload `Detect.ps1`, with "Run script as 32-bit process" and "Enforce script signature check" both set to No.
 6. Assign it to a test device first.
+
+**Checking a package** - drop any `.intunewin` on the page (ours, or one from IntuneWinAppUtil.exe) and the server opens it the way Intune would: it shows whether it decrypts and is intact, the files inside, and the text of its scripts.
 
 **Troubleshooting on a device** - look in `C:\Intune\Logs` for `<App>_<Version>-Install.log`, `-Uninstall.log` and `-Detect.log` (plus `-Install-msi.log` for MSI installers).
 
@@ -139,10 +143,17 @@ The upload is verified against the declared size and CRC-32, and a mismatch is r
 | `<installer>.intunewin` | The app package. Contains the installer, `Install.ps1` and `Uninstall.ps1`. |
 | `Detect.ps1` | Upload as the custom detection script. |
 | `Install.ps1`, `Uninstall.ps1` | Reference copies of the two scripts inside the package. |
-| `README.txt` | The install / uninstall commands and detection settings to enter in Intune, and anything to fix first. |
+| `Logo.png` | The app's icon, for the logo under App information (when one was found or chosen). |
+| `Test-InSandbox.cmd`, `Test-InSandbox.ps1` | The Windows Sandbox test - see below. |
+| `README.txt` | The install / uninstall commands, detection, requirement and return-code settings to enter in Intune, and anything to fix first. |
 
 - **Install / Uninstall** run the command shown in the two boxes above the button (prefilled from detection or the catalog; edit them if a command has a `<placeholder>` or no uninstall command was found). They relaunch as 64-bit PowerShell, return the installer's own exit code to Intune, write a transcript to `C:\Intune\Logs\<App>_<Version>-Install.log` / `-Uninstall.log`, and add a verbose `/L*v` log for MSI. They refuse to run a command that still contains a `<placeholder>`.
+- **Post-install**, when one is entered, runs inside `Install.ps1` after a success exit code (0, 1707, 3010, 1641). If it throws, `Install.ps1` returns 1. Every script is started with `-NonInteractive`, so anything that would wait for input fails with an error in the log instead of hanging the deployment forever.
 - **Detect** follows the detection rule picked on the page: a file path when the catalog knows one, the MSI product code when there is one, otherwise the app's display name in "Programs and Features" (a guess from the installer's metadata - check it). Each check adds a line to `C:\Intune\Logs\<App>_<Version>-Detect.log`.
+
+**Sandbox test.** `Test-InSandbox.ps1` writes a `.wsb` that maps the unzipped bundle into a fresh Windows Sandbox and runs itself in there. Inside, it unpacks the `.intunewin` with the keys from `Detection.xml` (HMAC checked, AES decrypted - as the Intune agent does), then runs each step as SYSTEM through a scheduled task, with Install/Uninstall started from 32-bit PowerShell like the agent: `Detect` (expect not installed), `Install`, `Detect` (expect installed), `Uninstall`, `Detect` (expect not installed). Each step has a time limit (60 minutes for install and uninstall, as in Intune), so a silent install stuck on a dialog shows up as a failure. It compares the uninstall registry before and after the install to record what the app really registered; the page's **Load sandbox results…** reads that `report.json`.
+
+**Saved settings.** After each bundle, the page saves what it was built with - commands (with the installer's file name as `{file}`), detection, post-install and a custom logo - under `DATA_DIR/profiles/<app>.json`. The next installer of the same app loads them; a minimum version that equalled the old version moves up to the new one.
 
 The scripts are generated in the page (`src/lib/deployScripts.ts`) and sent with the upload; the server only zips them. The bundle zip is never written to disk - the server keeps the package and wraps it on the way out - so a bundle needs no more space than a plain package.
 
@@ -150,7 +161,10 @@ The scripts are generated in the page (`src/lib/deployScripts.ts`) and sent with
 GET  api/health                             -> { ok, maxBytes }
 POST api/intunewin?file=&app=&crc32=<hex>   body: raw installer, Content-Type: application/octet-stream
 POST api/bundle                             body: [u32 LE length][JSON incl. scripts][raw installer]
-GET  api/intunewin/<id>                     -> the package
+GET  api/intunewin/<id>                     -> the package (checked by the server before this is offered)
+POST api/inspect                            body: a .intunewin -> { ok, problems, passed, files, scripts }
+GET  api/profiles                           -> saved app settings, listed
+GET|PUT|DELETE api/profiles/<key>           one app's saved settings (PUT as application/json)
 ```
 
 `npm run test:server` checks that the server's output is **byte-identical** to the in-browser builder's for the same keys, and round-trips a package through the HTTP API. `node scripts/test-server-package.ts --big 5 out.intunewin` adds a 5 GB ZIP64 package. Not yet tested: uploading a >4 GB (ZIP64) package to a live Intune tenant - packages that size from `IntuneWinAppUtil.exe` are ZIP64 too, but verify one in your tenant before relying on it.

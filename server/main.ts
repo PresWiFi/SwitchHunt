@@ -10,6 +10,12 @@
  *   POST api/intunewin?file=&app=&crc32=<hex>    body: raw installer bytes -> { id, fileName, size, url }
  *   POST api/bundle                              body: [u32 LE length][JSON][raw installer bytes] -> same reply
  *   GET  api/intunewin/<id>                      -> the package or bundle (deleted once fully downloaded)
+ *   POST api/inspect                             body: a .intunewin -> what is inside, and whether it is sound
+ *   GET  api/profiles                            -> [{ key, appName, version, savedAt }]
+ *   GET|PUT|DELETE api/profiles/<key>            saved settings for one app (JSON), kept under DATA_DIR/profiles
+ *
+ * Every package is opened and checked (server/inspect.ts) before it is offered for download; the
+ * reply's `verified` lists what passed. A package that fails is deleted and the build is an error.
  *
  * A bundle is a zip holding the .intunewin plus loose deployment scripts. The JSON names the
  * installer ({ file, app, crc32 }) and carries two lists of small text files: `payloadFiles` go
@@ -20,8 +26,8 @@
  * No dependencies beyond Node itself. There is NO authentication - run it on a network you trust
  * or put it behind a reverse proxy that adds some.
  */
-import { createReadStream } from 'node:fs';
-import { mkdir, readdir, rename, rm, stat, statfs } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { mkdir, readdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -29,6 +35,7 @@ import { basename, extname, join, normalize, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { buildIntuneWinFile, localHeader, packagedSize, zipTail, type ExtraFile, type ZipEntry } from './intunewin.ts';
+import { inspectIntuneWin } from './inspect.ts';
 import { crc32 } from 'node:zlib';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -50,7 +57,7 @@ interface Pkg {
   wrap?: { head: Buffer; tail: Buffer };
 }
 const packages = new Map<string, Pkg>();
-const OURS = /^[0-9a-f]{32}\.intunewin(\.part)?$/;
+const OURS = /^[0-9a-f]{32}\.intunewin(\.part)?(\.payload)?$/;
 
 class HttpError extends Error {
   status: number;
@@ -82,9 +89,10 @@ async function build(req: IncomingMessage, res: ServerResponse, source: AsyncIte
   if (!b.setupFile) throw new HttpError(400, 'file (the installer file name) is required.');
   const appName = b.appName.replace(/[\u0000-\u001f]/g, '').trim() || b.setupFile;
 
+  // Twice the package: checking it decrypts a copy of its content next to it for a moment.
   const total = packagedSize(b.setupFile, appName, b.size, b.payloadFiles);
   const free = await statfs(DATA_DIR).then((s) => s.bavail * s.bsize, () => Infinity);
-  if (total > free) throw new HttpError(507, `Not enough disk space on the server: the package needs ${Math.ceil(total / 1024 ** 2)} MB, ${Math.floor(free / 1024 ** 2)} MB is free.`);
+  if (total * 2 > free) throw new HttpError(507, `Not enough disk space on the server: building and checking the package needs ${Math.ceil(total * 2 / 1024 ** 2)} MB, ${Math.floor(free / 1024 ** 2)} MB is free.`);
 
   const id = randomBytes(16).toString('hex');
   const path = join(DATA_DIR, `${id}.intunewin`);
@@ -97,6 +105,12 @@ async function build(req: IncomingMessage, res: ServerResponse, source: AsyncIte
     await rm(part, { force: true });
     if (req.destroyed && !req.complete) return;                       // the browser went away mid-upload
     throw new HttpError(400, (e as Error).message);
+  }
+  const check = await inspectIntuneWin(path);
+  if (!check.ok) {
+    await rm(path, { force: true });
+    console.error(`package check failed for ${JSON.stringify(b.setupFile)}: ${check.problems.join('; ')}`);
+    throw new HttpError(500, `The package was built but failed its own check, so it was discarded: ${check.problems.join('; ')}. Please report this.`);
   }
   const stem = b.setupFile.replace(/\.[^.]+$/, '') || 'package';
   const pkg: Pkg = { path, fileName: `${stem}.intunewin`, size: built.size, created: Date.now() };
@@ -118,7 +132,7 @@ async function build(req: IncomingMessage, res: ServerResponse, source: AsyncIte
   }
   packages.set(id, pkg);
   console.log(`built ${id} ${JSON.stringify(b.setupFile)} ${b.size} -> ${pkg.size} bytes${pkg.wrap ? ' (bundle)' : ''}`);
-  json(res, 201, { id, fileName: pkg.fileName, size: pkg.size, url: `api/intunewin/${id}` });
+  json(res, 201, { id, fileName: pkg.fileName, size: pkg.size, url: `api/intunewin/${id}`, verified: { passed: check.passed, files: check.files } });
 }
 
 // Requiring a non-form content type means a cross-origin page cannot fire an upload at a local
@@ -205,6 +219,73 @@ async function handleBundle(req: IncomingMessage, res: ServerResponse): Promise<
   } finally { await end(); }
 }
 
+/** Inspect an uploaded .intunewin: stream it to disk, open it like Intune would, report, delete. */
+async function handleInspect(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const size = uploadSize(req);
+  if (MAX_BYTES && size > MAX_BYTES) throw new HttpError(413, `That file is over this server's ${Math.round(MAX_BYTES / 1024 ** 3)} GB limit (MAX_UPLOAD_GB).`);
+  const free = await statfs(DATA_DIR).then((s) => s.bavail * s.bsize, () => Infinity);
+  if (size * 2 > free) throw new HttpError(507, `Not enough disk space on the server to inspect a ${Math.ceil(size / 1024 ** 2)} MB package.`);
+  const path = join(DATA_DIR, `${randomBytes(16).toString('hex')}.intunewin.part`);
+  try {
+    await pipeline(req, createWriteStream(path));
+    json(res, 200, await inspectIntuneWin(path));
+  } finally {
+    await rm(path, { force: true });
+  }
+}
+
+// ── saved app profiles ───────────────────────────────────────────────────────
+// What the page last built a bundle with for an app - commands, detection, post-install, logo - so
+// the next version of the same app is one click. One small JSON file per app; the page owns the
+// shape, the server only checks the key and the size. Kept on the /data volume across restarts.
+const PROFILE_DIR = join(DATA_DIR, 'profiles');
+const MAX_PROFILE = 8 * 1024 * 1024;   // room for a custom logo as base64
+const profilePath = (key: string) => join(PROFILE_DIR, `${key}.json`);
+
+async function handleProfiles(req: IncomingMessage, res: ServerResponse, key: string | undefined): Promise<void> {
+  if (!key) {
+    if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed.');
+    const list = [];
+    for (const f of (await readdir(PROFILE_DIR).catch(() => [] as string[])).filter((n) => n.endsWith('.json'))) {
+      try {
+        const p = JSON.parse(await readFile(join(PROFILE_DIR, f), 'utf8'));
+        list.push({ key: f.slice(0, -5), appName: p.appName, version: p.version, savedAt: p.savedAt });
+      } catch { /* a damaged file is skipped, not fatal */ }
+    }
+    return json(res, 200, list);
+  }
+  if (req.method === 'GET') {
+    const text = await readFile(profilePath(key), 'utf8').catch(() => null);
+    if (text == null) throw new HttpError(404, 'No saved settings for that app.');
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(text);
+    return;
+  }
+  if (req.method === 'DELETE') {
+    await rm(profilePath(key), { force: true });
+    return json(res, 200, { ok: true });
+  }
+  if (req.method !== 'PUT') throw new HttpError(405, 'Method not allowed.');
+  // JSON only: a cross-site form cannot send it without a preflight, which this server never answers.
+  if (!/^application\/json\b/i.test(req.headers['content-type'] ?? '')) throw new HttpError(415, 'Send the profile as application/json.');
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req as AsyncIterable<Buffer>) {
+    size += c.length;
+    if (size > MAX_PROFILE) throw new HttpError(413, 'That profile is too large.');
+    chunks.push(c);
+  }
+  let body: unknown;
+  try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new HttpError(400, 'The profile is not valid JSON.'); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'The profile must be a JSON object.');
+  const saved = { ...(body as object), savedAt: new Date().toISOString() };
+  await mkdir(PROFILE_DIR, { recursive: true });
+  const tmp = `${profilePath(key)}.tmp`;
+  await writeFile(tmp, JSON.stringify(saved));
+  await rename(tmp, profilePath(key));
+  json(res, 200, { ok: true, savedAt: saved.savedAt });
+}
+
 async function handleDownload(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
   const pkg = packages.get(id);
   if (!pkg) throw new HttpError(404, 'That package has expired or was already downloaded. Build it again.');
@@ -267,11 +348,14 @@ async function handleStatic(req: IncomingMessage, res: ServerResponse, pathname:
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const api = url.pathname.match(/\/api\/(health|intunewin|bundle)(?:\/([0-9a-f]{32}))?$/);
+    const prof = url.pathname.match(/\/api\/profiles(?:\/([a-z0-9][a-z0-9-]{0,79}))?$/);
+    if (prof) return await handleProfiles(req, res, prof[1]);
+    const api = url.pathname.match(/\/api\/(health|intunewin|bundle|inspect)(?:\/([0-9a-f]{32}))?$/);
     const read = req.method === 'GET' || req.method === 'HEAD';
     if (api?.[1] === 'health' && read) return json(res, 200, { ok: true, maxBytes: MAX_BYTES });
     if (api?.[1] === 'intunewin' && !api[2] && req.method === 'POST') return await handleBuild(req, res, url.searchParams);
     if (api?.[1] === 'bundle' && !api[2] && req.method === 'POST') return await handleBundle(req, res);
+    if (api?.[1] === 'inspect' && !api[2] && req.method === 'POST') return await handleInspect(req, res);
     if (api?.[1] === 'intunewin' && api[2] && read) return await handleDownload(req, res, api[2]);
     if (api) throw new HttpError(405, 'Method not allowed.');
     if (!read) throw new HttpError(405, 'Method not allowed.');
